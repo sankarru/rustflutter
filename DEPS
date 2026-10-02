@@ -137,6 +137,12 @@ deps = {
   Var('flutter_git') + '/third_party/ocmock@' + Var('ocmock_rev'),
   'src/flutter/third_party/libjpeg-turbo/src':
   Var('flutter_git') + '/third_party/libjpeg-turbo@0fb821f3b2e570b2783a94ccd9a2fb1f4916ae9f',
+  # flutter/common/graphics deps on //flutter/third_party/boringssl, so nothing
+  # builds without this one. gen_deps.py dropped it because upstream keys it off
+  # a Dart var; the revision is unchanged and the wrapper BUILD.gn beside this
+  # is upstream's, from cf97bfbcb9f.
+  'src/flutter/third_party/boringssl/src':
+  'https://boringssl.googlesource.com/boringssl.git@' + Var('dart_boringssl_rev'),
   'src/flutter/third_party/libpng':
   Var('flutter_git') + '/third_party/libpng@b6004397d2ab98f0250376d9b357337b7f422d13',
   'src/flutter/third_party/libwebp':
