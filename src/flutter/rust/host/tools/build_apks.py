@@ -150,12 +150,55 @@ def main(argv):
   parser.add_argument('--java-home', default=os.environ.get('JAVA_HOME'))
   parser.add_argument('--only', nargs='*',
                       help='build only these applications')
+  # make_apk.py's own defaults for these are android-36.1 and 36.0.0, which are
+  # not what build/config/android/config.gni asks the engine to build against --
+  # it defaults to android_sdk_version 36 and build tools 36.1.0. The APK has to
+  # agree with the engine that produced the library, so both are passable here
+  # and neither is guessed.
+  parser.add_argument('--platform', default=None,
+                      help='android-N to compile against, from --sdk; '
+                           'defaults to the highest platform installed there')
+  parser.add_argument('--build-tools', default=None,
+                      help='the build-tools version to take aapt2, d8, '
+                           'zipalign and apksigner from; defaults to the '
+                           'highest installed')
   args = parser.parse_args(argv)
 
   if not args.sdk:
     raise SystemExit('No Android SDK: pass --sdk or set ANDROID_SDK_ROOT.')
   if not args.java_home:
     raise SystemExit('No JDK: pass --java-home or set JAVA_HOME.')
+
+  # Sorted by the version's own numbers rather than by name, so 36.1.0 beats
+  # 9.0.0 instead of losing to it.
+  def newest(root, prefix):
+    if not os.path.isdir(root):
+      return None
+    found = []
+    for entry in os.listdir(root):
+      if not entry.startswith(prefix):
+        continue
+      version = entry[len(prefix):]
+      if not version:
+        continue
+      try:
+        found.append((tuple(int(p) for p in version.split('.')), entry))
+      except ValueError:
+        continue
+    if not found:
+      return None
+    return max(found)[1]
+
+  if not args.platform:
+    args.platform = newest(os.path.join(args.sdk, 'platforms'), 'android-')
+    if not args.platform:
+      raise SystemExit('No platforms in %s: nothing to compile against.'
+                       % os.path.join(args.sdk, 'platforms'))
+  if not args.build_tools:
+    args.build_tools = newest(os.path.join(args.sdk, 'build-tools'), '')
+    if not args.build_tools:
+      raise SystemExit('No build-tools in %s.'
+                       % os.path.join(args.sdk, 'build-tools'))
 
   # The stripped libraries, which are what goes in a package: the unstripped
   # ones are a hundred megabytes of debug information the device has no use for.
@@ -191,6 +234,8 @@ def main(argv):
         '--sdk', args.sdk,
         '--java-home', args.java_home,
         '--abi', abi_for(args.out),
+        '--platform', args.platform,
+        '--build-tools', args.build_tools,
     ]
     # Only for an application that asked for it. One that linked the archive
     # carries the engine already, and a second copy would be 15 MB of APK

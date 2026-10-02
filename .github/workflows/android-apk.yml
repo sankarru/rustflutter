@@ -143,11 +143,17 @@ jobs:
       - name: ninja
         run: ninja -C src/out/android_release_arm64 flutter/rust/examples/counter
 
+      # Packaging picks the platform and build-tools out of the CIPD SDK, since
+      # make_apk.py's own defaults (android-36.1, 36.0.0) are not the ones
+      # config.gni builds the engine against. Listed here because "No android.jar
+      # at .../platforms/android-36.1" is otherwise the only clue.
       - name: Package APKs
         env:
           ANDROID_SDK_ROOT: ${{ github.workspace }}/src/flutter/third_party/android_tools/sdk
         run: |
           ls -la src/out/android_release_arm64/*.so
+          ls src/flutter/third_party/android_tools/sdk/platforms/
+          ls src/flutter/third_party/android_tools/sdk/build-tools/
           python3 src/flutter/rust/host/tools/build_apks.py --out src/out/android_release_arm64
           ls -la src/out/android_release_arm64/apk/
 
