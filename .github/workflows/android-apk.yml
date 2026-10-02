@@ -29,7 +29,6 @@ jobs:
     # A cold engine build is long. 330 is under the 360 GitHub enforces.
     timeout-minutes: 330
     env:
-      DEPOT_TOOLS_UPDATE: "0"
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       # ccache bakes absolute paths into its hash. The workspace and the
       # buildtools under it land at a different path on every runner, so
@@ -102,6 +101,13 @@ jobs:
         run: |
           git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git
           echo "$GITHUB_WORKSPACE/depot_tools" >> "$GITHUB_PATH"
+
+      # depot_tools ships its `ninja` and `gn` shims, so putting it on PATH is
+      # enough to make `ninja` below resolve to them -- which is why they have
+      # to be bootstrapped first. Without this the build dies immediately with
+      # "python3_bin_reldir.txt not found".
+      - name: Bootstrap depot_tools
+        run: update_depot_tools --no-registry
 
       # --no-history keeps this to the working tree rather than full clones,
       # which is the difference between a sync that fits on the runner and one
