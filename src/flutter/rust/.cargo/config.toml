@@ -1,0 +1,79 @@
+# Cargo build configuration for the Rust side of the engine, targeting Android.
+#
+# Read this by `cd`-ing into `src/flutter/rust` (next to the workspace
+# `Cargo.toml`) or anywhere below it -- cargo discovers `.cargo/config.toml` by
+# walking up from the current directory. Running cargo from the repository root
+# finds no `Cargo.toml` at all, because the workspace is rooted at
+# `src/flutter/rust`, not at the top of the checkout.
+
+# Permits the `codegen-backend` profile key in the workspace `Cargo.toml`
+# without passing `-Zcodegen-backend` on every invocation.
+[unstable]
+codegen-backend = true
+
+[build]
+# Crates compiled in parallel. `nproc` here is 8.
+#
+# This is *not* the knob that matters for this workspace: it holds one very
+# large crate, so there is nothing for `-j` to overlap. Intra-crate parallelism
+# comes from `codegen-units` (256 in the workspace `Cargo.toml`) and from
+# rustc's own frontend/backend thread pools, sized under `[target.*]` below.
+jobs = 8
+
+# sccache in front of rustc. On PATH at /usr/sbin/sccache.
+#
+# Requires `incremental = false` in every profile, which the workspace
+# `Cargo.toml` sets -- sccache rejects incremental compilations outright.
+rustc-wrapper = "sccache"
+
+[env]
+# sccache refuses to cache anything if CARGO_INCREMENTAL is set to 1, including
+# if cargo sets it implicitly. Pinning it to 0 here means the workspace profiles
+# and this setting cannot disagree.
+CARGO_INCREMENTAL = "0"
+SCCACHE_DIR = { value = "/home/flux/.cache/sccache", relative = false }
+SCCACHE_CACHE_SIZE = "10G"
+# Seconds the sccache server stays up with nothing to do. It is a local daemon,
+# so leaving it resident is what makes the next build a cache hit instead of a
+# cold compile; 600 is well past any gap between builds.
+SCCACHE_IDLE_TIMEOUT = "600"
+
+[target.aarch64-linux-android]
+# NDK r29, at /home/flux/Android/ndk/r29.
+#
+# The prebuilt directory is named `linux-x86_64` but the clang in it is an
+# aarch64 build (it reports `Target: aarch64-unknown-linux-gnu`), so it runs
+# natively here. Read the path out of `source.properties` rather than trusting
+# the directory name if the NDK is ever replaced.
+#
+# API level 24 because that is what the engine's own
+# `flutter/shell/platform/android/AndroidManifest.xml` declares
+# (`android:minSdkVersion="24"`, `targetSdkVersion="36"`). The NDK offers
+# wrappers from 21 up; picking a lower one links against symbols the APK's
+# manifest will not let the loader resolve, and it fails at install time on the
+# device rather than at build time here.
+linker = "/home/flux/Android/ndk/r29/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+# NDK r29 dropped the `ar` shim; llvm-ar is the one it ships.
+ar = "/home/flux/Android/ndk/r29/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+rustflags = [
+    "-Clink-arg=--target=aarch64-linux-android24",
+    "-Clink-arg=-fuse-ld=lld",
+    # rustc's frontend/backend thread pools. This is the setting that actually
+    # parallelises this workspace -- see `[build] jobs` above.
+    "-Zthreads=8",
+]
+
+[alias]
+# Android, LLVM backend (the default, and the one that is correct).
+an = "build --workspace --target aarch64-linux-android"
+anr = "build --workspace --target aarch64-linux-android --release"
+# Android, Cranelift backend: ~4x faster cold builds, but it miscompiles the
+# framework's panic recovery. See `[profile.cl]` in the workspace `Cargo.toml`.
+# For iteration only -- never ship an APK built this way.
+cl = "build --workspace --target aarch64-linux-android --profile cl"
+# Host-target tests. Runs 6995 tests against the inert engine stubs in
+# `rustflutter/src/engine_test_stubs.rs`, so no C++ engine build is needed --
+# but this is also how the Cranelift miscompilation above is caught, so it needs
+# `--profile cl` to test Cranelift rather than the LLVM default.
+t = "test --workspace"
+tcl = "test --workspace --profile cl"

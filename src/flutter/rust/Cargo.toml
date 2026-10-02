@@ -1,0 +1,56 @@
+# Cargo workspace for the Rust side of the engine.
+#
+# `rustflutter/` is the framework crate. It is the only Cargo package in this
+# tree: the applications under `examples/` and the engine itself are GN targets
+# built by ninja, not Cargo packages, so they are deliberately not members.
+# Nothing here changes what GN compiles -- GN reads `rustflutter/BUILD.gn` and
+# never looks at this file.
+#
+# Applications that live outside this repository (see `rustflutter create`) are
+# ordinary Cargo projects and are not members either; they depend on the
+# framework by path and bring their own lockfile.
+
+cargo-features = ["codegen-backend"]
+
+[workspace]
+members = ["rustflutter"]
+# The framework crate is edition 2024, so resolver v3.
+resolver = "3"
+
+# sccache (the `rustc-wrapper` in `.cargo/config.toml`) refuses incremental
+# compilation, so every profile here opts out. Cranelift reaches much of its
+# parallelism through codegen-units rather than through `-j`, and the framework
+# crate is one very large crate -- 256 units is what makes a cold build bearable.
+[profile.dev]
+codegen-units = 256
+incremental = false
+
+# Cranelift, as an opt-in profile rather than the `dev` default.
+#
+# It is not the default because it miscompiles this crate's panic handling: the
+# three `framework::tests` cases about a panicking `build` -- a
+# component_that_always_panics_stays_bounded,
+# a_panicking_build_is_replaced_and_the_frame_finishes,
+# a_retried_build_recovers_the_subtree -- let the panic escape the
+# `catch_unwind` at `rustflutter/src/framework.rs:2565` instead of being caught
+# by it. All three pass under LLVM and all three fail here. Recovering from a
+# panicking component is a guarantee the framework makes, so it is not something
+# to trade for build time without deciding that deliberately.
+#
+# Worth knowing: it compiles clean and the other 6992 tests pass, so a build that
+# only cross-compiles to Android (which never runs the test suite) will not
+# surface this. Use it for fast iteration on layout and painting, not for a
+# release.
+#
+#   cargo build --profile cl --target aarch64-linux-android
+[profile.cl]
+inherits = "dev"
+codegen-backend = "cranelift"
+
+# The engine has to be linked in as a release archive: everything in it uses the
+# static CRT (`/MT`), which is what rustc links against. A debug engine build
+# uses `/MTd` and will not link. So there is no point in a Cranelift release
+# profile -- the release build is dominated by the C++ link, not by rustc.
+[profile.release]
+codegen-units = 16
+incremental = false
