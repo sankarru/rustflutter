@@ -54,10 +54,16 @@ jobs:
       # rust.gni resolves `rustc` off PATH and passes --edition 2024 to every
       # crate. 1.93.0 is the version the README records as verified; stable has
       # moved on since and nothing here has been re-checked against it.
+      #
+      # The target's std has to be installed explicitly. GN calls rustc with
+      # --target=aarch64-linux-android directly rather than going through cargo,
+      # so there is no manifest anywhere to trigger the download, and the build
+      # stops at [2/5272] with "can't find crate for `std`" without this.
       - name: Set up rustc
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.93.0
+          targets: aarch64-linux-android
 
       # The runner ships toolchains this build has no use for. Reclaiming them
       # matters: the gclient sync and the build together want more disk than a
