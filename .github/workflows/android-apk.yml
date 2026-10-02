@@ -35,8 +35,14 @@ jobs:
       # without this every run is a miss against the previous one.
       CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_MAXSIZE: "5G"
-      # ccache 4.x spells this CCACHE_NOCOMPRESS. There is no CCACHE_COMPRESS.
-      CCACHE_NOCOMPRESS: "true"
+      # ccache 4.x has no CCACHE_COMPRESS; the knob is CCACHE_NOCOMPRESS.
+      #
+      # CCACHE_COMPILERCHECK=content is the load-bearing one. By default ccache
+      # hashes the compiler binary's size and mtime, and DEPS downloads a fresh
+      # clang into src/flutter/buildtools on every runner -- different mtime each
+      # time, so every object looks like it came from a different compiler and
+      # nothing ever hits. Hashing content instead is what Chromium's own CI does.
+      CCACHE_COMPILERCHECK: "content"
 
     steps:
       - name: Checkout
