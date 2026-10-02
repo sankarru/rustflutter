@@ -36,7 +36,8 @@ jobs:
       # without this every run is a miss against the previous one.
       CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_MAXSIZE: "5G"
-      CCACHE_COMPRESS: "false"
+      # ccache 4.x spells this CCACHE_NOCOMPRESS. There is no CCACHE_COMPRESS.
+      CCACHE_NOCOMPRESS: "true"
 
     steps:
       - name: Checkout
@@ -62,10 +63,15 @@ jobs:
       # The runner ships toolchains this build has no use for. Reclaiming them
       # matters: the gclient sync and the build together want more disk than a
       # stock runner has free.
+      #
+      # /usr/local/lib/android goes because the SDK this build uses comes from
+      # CIPD into the workspace, not from there. $AGENT_TOOLSDIRECTORY does NOT
+      # go: setup-java installed the JDK into it, and build_apks.py needs that
+      # javac for d8 and apksigner.
       - name: Free runner disk
         run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY"/*
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          sudo rm -rf /usr/local/lib/android
           df -h /
 
       - name: Set up ccache
@@ -103,7 +109,7 @@ jobs:
       - name: gclient sync
         run: |
           cp tools/gclient.template .gclient
-          gclient sync --no-history --shallow --nohooks
+          gclient sync --no-history --nohooks
           gclient runhooks
 
       - name: gn gen
