@@ -66,12 +66,22 @@ const CORNER: f32 = 14.0;
 /// 60Hz budget absorbs without a visible hitch.
 const DECODES_PER_FRAME: usize = 2;
 
-/// Per second, the fraction of velocity a fling keeps. Applied per frame
-/// instead, because the frame *is* the clock here: see `Io::step_fling`.
-const DECAY: f32 = 0.94;
+/// How fast a fling loses speed, as the exponent of a time constant: the
+/// velocity is multiplied by e^-FRICTION for every second it runs. At 4.0 a
+/// fling is down to a tenth in about half a second, which reads as a coast
+/// rather than a stop.
+const FRICTION: f32 = 4.0;
 
-/// Below this many logical pixels per frame a fling is over.
-const FLING_CUTOFF: f32 = 0.35;
+/// Below this many logical pixels per second a fling is over.
+const FLING_CUTOFF: f32 = 12.0;
+
+/// The fastest a release is believed to have been. A flick the gesture
+/// recogniser scored from two noisy samples can come out absurd.
+const MAX_VELOCITY: f32 = 6000.0;
+
+/// The most a single frame may scroll, in logical pixels -- so one long frame,
+/// a decode's worth, does not throw the list off the screen.
+const MAX_STEP: f32 = 48.0;
 
 /// Ceiling on one response, so a wrong URL cannot fill memory.
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
@@ -167,7 +177,9 @@ struct Io {
     /// Asked for already, so a photo is requested once and not once a frame.
     asked: std::collections::HashSet<String>,
     wire: Arc<Mutex<Wire>>,
-    /// Velocity still integrating, logical pixels per frame.
+    /// Velocity still integrating, in logical pixels per second. Kept as a
+    /// velocity rather than a per-frame step so the same flick travels the same
+    /// distance at 90Hz as at 60Hz.
     fling: f32,
     /// The window's inner height, handed in by the application each frame --
     /// `Component::build` is given the element, not the view, so it has no size.
@@ -198,23 +210,20 @@ impl Io {
         self.offset = self.offset.clamp(0.0, self.max_offset());
     }
 
-    /// Moves the list by the velocity still integrating, and decays it.
+    /// Moves the list by the velocity still integrating, over `dt` seconds, and
+    /// decays that velocity.
     ///
-    /// Per frame rather than per second because the frame is the only clock
-    /// here. The scale on the velocity turns pixels-per-second into
-    /// pixels-per-frame; a long frame then travels further, which is what a
-    /// fling should do, and the per-frame decay below keeps the *number of
-    /// frames* to a stop the same on any refresh rate.
-    fn step_fling(&mut self) -> bool {
+    /// The sign is the drag's. A finger moving up is a negative `dy` and carries
+    /// the list further up, which is the offset growing -- so the offset
+    /// *gains* this velocity rather than losing it, and a release has to keep
+    /// the same sign the drag had.
+    fn step_fling(&mut self, dt: f32) -> bool {
         if self.fling.abs() < FLING_CUTOFF {
             self.fling = 0.0;
             return false;
         }
-        // Cap the step so one long frame -- a decode, a fetch's worth of
-        // scheduler noise -- does not throw the list across the screen.
-        let step = self.fling.clamp(-40.0, 40.0);
-        self.offset -= step;
-        self.fling *= DECAY;
+        self.offset += (self.fling * dt).clamp(-MAX_STEP, MAX_STEP);
+        self.fling *= (-FRICTION * dt).exp();
         self.clamp();
         true
     }
@@ -244,14 +253,9 @@ impl StatefulComponent for Page {
             .replace(Instant::now())
             .map(|then| then.elapsed().as_secs_f32().min(0.1))
             .unwrap_or(0.0);
-        let flinging = if elapsed > 0.0 {
-            // Convert the per-frame decay into a per-second one for this gap.
-            let frames = elapsed * 60.0;
-            io.fling = io.fling * DECAY.powf(frames);
-            io.step_fling()
-        } else {
-            false
-        };
+        // No elapsed time means no motion: the first frame has no previous one,
+        // and a fling stepped then would jump a whole frame's worth.
+        let flinging = elapsed > 0.0 && io.step_fling(elapsed);
 
         // Decode what has arrived, metered. The only expensive thing on this
         // thread, so it is rationed.
@@ -335,7 +339,9 @@ impl StatefulComponent for Page {
             })
             .with_drag_end(move |event| {
                 let mut io = on_release.borrow_mut();
-                io.fling = -event.velocity.dy / 60.0;
+                // Negated for the same reason the drag is: a finger moving up is
+                // a negative dy and the offset grows.
+                io.fling = -event.velocity.dy.clamp(-MAX_VELOCITY, MAX_VELOCITY);
                 release_handle.set_state(|()| ());
             });
 
