@@ -121,11 +121,15 @@ jobs:
           SLIM=""
           if [ "$SLIMPELLER" = "true" ]; then SLIM="--slimpeller"; fi
           echo "slimpeller=$SLIMPELLER ($SLIM)"
+          # --target-dir pins out/android_release_arm64. Without it tools/gn
+          # appends "slimpeller" to the directory name (tools/gn:65-66), so
+          # every path below would have to be conditional on the flag.
           vpython3 flutter/tools/gn \
             $SLIM \
             --android \
             --android-cpu arm64 \
             --runtime-mode=release \
+            --target-dir=android_release_arm64 \
             --no-lto \
             --no-prebuilt-dart-sdk \
             --no-goma \
