@@ -38,6 +38,26 @@ SCCACHE_CACHE_SIZE = "10G"
 # cold compile; 600 is well past any gap between builds.
 SCCACHE_IDLE_TIMEOUT = "600"
 
+# The prebuilt shared engine, for the crates under apps/. Downloaded from the
+# rustflutter-engine-<abi> artifact of the android-shared-engine workflow, which
+# builds it with gn and ninja on a machine that has the RAM for the 5272 C++
+# targets -- this one does not.
+#
+# The `_arm64` suffix is load-bearing and not decoration. build_apks.py's abi_for()
+# reads the ABI off the *directory name* (`..._arm64` -> arm64-v8a) and falls
+# through to armeabi-v7a for anything it does not recognise, so an engine fetched
+# into a directory called `engine` produces an APK that installs on nothing.
+#
+# force = false so an explicit RUSTFLUTTER_ENGINE_OUT in the environment wins
+# over this default; without it the [env] table would overwrite the caller's.
+RUSTFLUTTER_ENGINE_OUT = { value = "/home/flux/rustflutter/engine_arm64", relative = false, force = false }
+
+# NDK r29's compiler runtime, for libunwind.a. Rust's standard library unwinds;
+# the engine is built -fno-exceptions and links -nostdlib so it supplies none of
+# that, and an application is a cdylib with nothing else to. Static, so it adds
+# no runtime dependency to the APK.
+RUSTFLUTTER_NDK_UNWIND_DIR = { value = "/home/flux/Android/ndk/r29/toolchains/llvm/prebuilt/linux-x86_64/lib/clang/22/lib/linux/aarch64", relative = false, force = false }
+
 [target.aarch64-linux-android]
 # NDK r29, at /home/flux/Android/ndk/r29.
 #
