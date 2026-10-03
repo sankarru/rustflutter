@@ -1,0 +1,159 @@
+name: android-shared-engine
+
+# Builds the engine once, as a shared library, so that applications can be built
+# somewhere else without recompiling any of it.
+#
+# This is the artifact that makes "build the engine there, compile the Rust here"
+# possible. It is the same engine the examples otherwise fold in --
+# //flutter/rust:rustflutter_engine_shared rather than :rustflutter_engine -- and
+# the two come out of one compilation of the same objects, so nothing is
+# recompiled to get both.
+#
+# What an application needs from this, and nothing else:
+#
+#   librustflutter_engine.so   the engine. Exports the rf_* FFI, rf_host_run and
+#                              the two registration functions; Skia, Impeller,
+#                              txt, fml and the shell are all hidden inside it.
+#   rustflutter_link.txt       the link line, read by a Cargo build.rs. Written
+#                              by //flutter/rust:rustflutter_link_manifest, which
+#                              reads it back out of the shared target's own
+#                              .ninja file -- so it cannot drift from the build.
+#   icudtl.dat                 the ICU data, which the text stack loads at
+#                              startup out of the application's own directory.
+#
+# There is no engine artifact to download instead of building this. The rf_*
+# surface is implemented in flutter/rust/ffi and the RuntimeController in
+# flutter/runtime is a rewrite, both of them changes to engine C++, and Flutter
+# publishes engine artifacts only for commits that exist in flutter/flutter.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - 'src/flutter/rust/**'
+      - 'src/flutter/runtime/**'
+      - 'DEPS'
+      - '.github/workflows/android-shared-engine.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  engine:
+    name: librustflutter_engine.so (arm64-v8a)
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      # ccache hashes the compiler's size and mtime by default, and DEPS
+      # downloads a fresh clang every runner, so without this every object looks
+      # like it came from a different compiler and nothing ever hits.
+      CCACHE_COMPILERCHECK: "content"
+      CCACHE_MAXSIZE: "5G"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up rustc
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.93.0
+          targets: aarch64-linux-android
+
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          sudo rm -rf /usr/local/lib/android
+          df -h /
+
+      - name: Set up ccache
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ccache
+          ccache --version | head -1
+          ccache --set-config=max_size="$CCACHE_MAXSIZE"
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-${{ runner.os }}-${{ hashFiles('DEPS', '.github/workflows/android-shared-engine.yml') }}
+          restore-keys: |
+            ccache-${{ runner.os }}-
+
+      - name: Set up depot_tools
+        run: |
+          git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          echo "$GITHUB_WORKSPACE/depot_tools" >> "$GITHUB_PATH"
+
+      # depot_tools' ninja and gn are shims that refuse to run unbootstrapped.
+      - name: Bootstrap depot_tools
+        run: update_depot_tools --no-registry
+
+      - name: gclient sync
+        run: |
+          cp tools/gclient.template .gclient
+          gclient sync --no-history --nohooks
+          gclient runhooks
+
+      # Same arguments as the APK workflow. --ccache and --no-rbe together,
+      # because build/toolchain/ccache.gni asserts the two are exclusive.
+      - name: gn gen
+        run: |
+          cd src
+          vpython3 flutter/tools/gn \
+            --android \
+            --android-cpu arm64 \
+            --runtime-mode=release \
+            --no-lto \
+            --no-prebuilt-dart-sdk \
+            --no-goma \
+            --no-rbe \
+            --ccache
+
+      - name: ninja
+        run: |
+          ninja -C src/out/android_release_arm64 \
+            flutter/rust:rustflutter_engine_shared \
+            flutter/rust:rustflutter_link_manifest
+          du -sh src/out
+
+      # One directory, in the layout an application wants: the library and the
+      # manifest beside each other, because a Cargo build.rs reads the manifest
+      # out of the same directory it links the library from. lib.stripped/ is
+      # alongside because build_apks.py looks there for both the engine and the
+      # application's own library.
+      - name: Assemble
+        run: |
+          set -eux
+          OUT=src/out/android_release_arm64
+          DEST=engine
+          mkdir -p "$DEST/lib.stripped"
+
+          # The stripped copy is what ships, and what an application links
+          # against; the unstripped one is 274 MB of debug information.
+          cp "$OUT/lib.stripped/librustflutter_engine.so" "$DEST/librustflutter_engine.so"
+          cp "$OUT/lib.stripped/librustflutter_engine.so" "$DEST/lib.stripped/"
+          cp "$OUT/rustflutter_link.txt" "$DEST/"
+
+          # Same file the APK workflow packages as assets/icudtl.dat.
+          cp src/flutter/third_party/icu/flutter/icudtl.dat "$DEST/"
+
+          ls -la "$DEST" "$DEST/lib.stripped"
+          file "$DEST/librustflutter_engine.so"
+          cat "$DEST/rustflutter_link.txt"
+
+      - name: Report ccache
+        if: always()
+        run: ccache --show-stats
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rustflutter-engine-arm64
+          path: engine/
+          if-no-files-found: error
+          retention-days: 30
