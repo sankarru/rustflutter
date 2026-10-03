@@ -31,12 +31,13 @@ on:
     inputs:
       slimpeller:
         description: >-
-          Impeller only. Off means Skia Ganesh on GLES, which is what this build
-          produced until it was noticed that the README's "Impeller on the GPU
-          (GLES via ANGLE)" described nothing that was actually being compiled.
+          Strip Skia for binary size. NOT the renderer switch: Android already
+          selects Impeller, because Settings::enable_impeller defaults to true
+          there and RunOptions.impeller defaults to true. 'true' does not
+          compile -- see the comment on the gn gen step.
         type: choice
-        default: 'true'
-        options: ['true', 'false']
+        default: 'false'
+        options: ['false', 'true']
   push:
     branches: [master]
     paths:
@@ -60,9 +61,8 @@ jobs:
       # like it came from a different compiler and nothing ever hits.
       CCACHE_COMPILERCHECK: "content"
       CCACHE_MAXSIZE: "5G"
-      # Empty on a push, where workflow_dispatch inputs do not exist. A push
-      # builds the Impeller engine, which is the configuration under test.
-      SLIMPELLER: ${{ inputs.slimpeller || 'true' }}
+      # Empty on a push, where workflow_dispatch inputs do not exist.
+      SLIMPELLER: ${{ inputs.slimpeller || 'false' }}
 
     steps:
       - name: Checkout
@@ -121,6 +121,16 @@ jobs:
           SLIM=""
           if [ "$SLIMPELLER" = "true" ]; then SLIM="--slimpeller"; fi
           echo "slimpeller=$SLIMPELLER ($SLIM)"
+          # 'true' is a dead end and is kept only so the failure is on record.
+          # Two errors, both in fork code, both from Skia Ganesh being compiled
+          # out from under it:
+          #   rustflutter_ffi.cc:661  DlSkCanvasAdapter is Ganesh-only, and
+          #     RasterizeToSurface() replays a DisplayList into a CPU SkSurface
+          #     through it -- that is how rf_layer_tree_write_png rasterises.
+          #   rustflutter_host_android.cc:1930  Settings::enable_impeller is a
+          #     `static constexpr const bool` under SLIMPELLER (settings.h:232)
+          #     and the host assigns to it from the framework's runtime switch.
+          #
           # --target-dir pins out/android_release_arm64. Without it tools/gn
           # appends "slimpeller" to the directory name (tools/gn:65-66), so
           # every path below would have to be conditional on the flag.
@@ -174,7 +184,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: rustflutter-engine-arm64-sl${{ inputs.slimpeller || 'true' }}
+          name: rustflutter-engine-arm64-sl${{ inputs.slimpeller || 'false' }}
           path: engine/
           if-no-files-found: error
           retention-days: 30
