@@ -1,0 +1,35 @@
+# One example, built as a Cargo application against a prebuilt shared engine.
+#
+# The source is the example's own main.rs, unmodified and not copied: this crate
+# is a way to compile it, not a fork of it. GN builds the same file through the
+# rust_rlib tool into a shared library that folds the engine in; this builds it
+# into one that links the engine beside it. Either way the program is the same,
+# because the entry point does not change:
+#
+#   * `rustflutter_app_main` is what the host calls, on Android and elsewhere.
+#   * On Android the framework crate registers it from an `.init_array` entry
+#     while the loader is still inside System.loadLibrary -- see
+#     `android_entry` in rustflutter/src/app.rs, compiled in for
+#     `target_os = "android"`.
+#
+# So this crate declares no `fn main`, and there is none to add.
+
+[package]
+name = "counter"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+# `lib` as well as `cdylib` so `cargo test` and `cargo check` work; only the
+# cdylib is a shippable artifact. The name decides the file name, and
+# build_apks.py derives the APK's package id from it, so it has to stay `counter`.
+name = "counter"
+crate-type = ["lib", "cdylib"]
+path = "../../examples/counter/src/main.rs"
+
+[dependencies]
+# The framework, by path. Compiled from source with this crate, so the
+# application and the framework are one Rust compilation; what is linked in
+# rather than compiled is the C++ engine underneath them -- see build.rs.
+rustflutter = { path = "../../rustflutter" }

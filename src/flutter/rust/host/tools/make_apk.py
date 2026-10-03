@@ -41,6 +41,7 @@ MANIFEST = '''<?xml version="1.0" encoding="utf-8"?>
 
   <uses-sdk android:minSdkVersion="{min_sdk}" android:targetSdkVersion="{target_sdk}" />
 
+{permissions}
   <application
       android:label="{label}"
       android:icon="@android:drawable/sym_def_app_icon"
@@ -63,6 +64,20 @@ MANIFEST = '''<?xml version="1.0" encoding="utf-8"?>
   </application>
 </manifest>
 '''
+
+
+def permissions(names):
+  """The <uses-permission> block, or nothing at all.
+
+  An application that fetches over the network needs INTERNET and there is no
+  other way to get it: the platform refuses the socket before any code of ours
+  runs. It is not on by default because least privilege is the better default
+  for an application that has no network in it, which is most of them.
+  """
+  if not names:
+    return ''
+  lines = [f'  <uses-permission android:name="{name}" />' for name in names]
+  return '\n'.join(lines) + '\n'
 
 
 def run(command, cwd=None):
@@ -133,6 +148,13 @@ def main(argv):
   parser.add_argument('--java-home', required=True, help='a JDK 17 or newer')
   parser.add_argument('--build-tools', default='36.0.0')
   parser.add_argument('--platform', default='android-36.1')
+  parser.add_argument('--permission', action='append', default=[],
+                      metavar='NAME',
+                      help='a permission to request, e.g. '
+                           'android.permission.INTERNET; repeatable. Android '
+                           'refuses every socket an application has not asked '
+                           'for, so an application that fetches anything needs '
+                           'this and cannot have it by default')
   parser.add_argument('--abi', default='arm64-v8a')
   parser.add_argument('--min-sdk', default='24')
   parser.add_argument('--target-sdk', default='34')
@@ -166,6 +188,7 @@ def main(argv):
     manifest_path = os.path.join(work, 'AndroidManifest.xml')
     with open(manifest_path, 'w', encoding='utf-8') as handle:
       handle.write(MANIFEST.format(package=package, label=label,
+                                   permissions=permissions(args.permission),
                                    library=library, min_sdk=args.min_sdk,
                                    target_sdk=args.target_sdk))
 

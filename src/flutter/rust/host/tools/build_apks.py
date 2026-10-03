@@ -150,6 +150,12 @@ def main(argv):
   parser.add_argument('--java-home', default=os.environ.get('JAVA_HOME'))
   parser.add_argument('--only', nargs='*',
                       help='build only these applications')
+  parser.add_argument('--permission', action='append', default=[],
+                      metavar='NAME',
+                      help='a permission every APK here requests; repeatable. '
+                           'One that fetches anything needs '
+                           'android.permission.INTERNET -- Android refuses the '
+                           'socket otherwise, before any of our code runs')
   # make_apk.py's own defaults for these are android-36.1 and 36.0.0, which are
   # not what build/config/android/config.gni asks the engine to build against --
   # it defaults to android_sdk_version 36 and build tools 36.1.0. The APK has to
@@ -237,6 +243,10 @@ def main(argv):
         '--platform', args.platform,
         '--build-tools', args.build_tools,
     ]
+    # Not `name`: that is the application, further down and in the message
+    # below, and shadowing it made every APK report itself as a permission.
+    for permission in args.permission:
+      command += ['--permission', permission]
     # Only for an application that asked for it. One that linked the archive
     # carries the engine already, and a second copy would be 15 MB of APK
     # nothing opens.

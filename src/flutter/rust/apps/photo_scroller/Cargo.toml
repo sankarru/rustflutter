@@ -1,0 +1,33 @@
+[package]
+name = "photo_scroller"
+version = "0.1.0"
+edition = "2024"
+publish = false
+# This package is a library. The file is called main.rs because it is the
+# package's entry point in the ordinary sense -- it defines rustflutter_app_main
+# -- and not because cargo should read it as a second, binary target, which
+# would then want a `fn main` this crate has no reason to have.
+autobins = false
+
+[lib]
+# `lib` as well as `cdylib` so `cargo check` works. The name decides the file
+# name, and build_apks.py derives the APK's package id from it.
+name = "photo_scroller"
+crate-type = ["lib", "cdylib"]
+path = "src/main.rs"
+
+[dependencies]
+# The framework, by path. Compiled from source with this crate, so the
+# application and the framework are one Rust compilation; what is linked in
+# rather than compiled is the C++ engine underneath them -- see build.rs.
+rustflutter = { path = "../../rustflutter" }
+
+# The framework carries no HTTP of its own, deliberately: `[dependencies]` in
+# its own manifest is empty so the crate cannot drift from what GN builds. The
+# framework's `ImageProvider::Network` therefore takes a `fetch` closure from
+# the caller, and this is that closure's implementation.
+#
+# rustls rather than openssl: the engine links BoringSSL but does not export it,
+# so there is nothing to borrow, and this has to cross-compile to
+# aarch64-linux-android from the NDK alone.
+ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }

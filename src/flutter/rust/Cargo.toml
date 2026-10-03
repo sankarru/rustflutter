@@ -13,7 +13,7 @@
 cargo-features = ["codegen-backend"]
 
 [workspace]
-members = ["rustflutter"]
+members = ["rustflutter", "apps/*"]
 # The framework crate is edition 2024, so resolver v3.
 resolver = "3"
 
