@@ -1,7 +1,8 @@
 name: android-arm64-apk
 
-# Builds the counter example as an arm64-v8a APK, entirely from source, and
-# uploads it as a workflow artifact.
+# Builds one rustflutter example as an arm64-v8a APK, entirely from source, and
+# uploads it as a workflow artifact. Which example is a workflow_dispatch input;
+# a push builds counter.
 #
 # There is no prebuilt engine to lean on here. `flutter/rust/ffi` implements the
 # 102 `rf_*` entry points the Rust framework links against, and
@@ -16,6 +17,22 @@ name: android-arm64-apk
 
 on:
   workflow_dispatch:
+    inputs:
+      example:
+        description: Which example to package
+        type: choice
+        default: counter
+        options:
+          - counter
+          - cursor_demo
+          - exit_demo
+          - flutter_gallery
+          - gallery
+          - hello_world
+          - platform_channels
+          - settings_demo
+          - showcase
+          - text_demo
   push:
     branches: [master]
 
@@ -24,11 +41,13 @@ permissions:
 
 jobs:
   apk:
-    name: counter.apk (arm64-v8a)
+    name: ${{ inputs.example || 'counter' }}.apk (arm64-v8a)
     runs-on: ubuntu-latest
     # A cold engine build is long. 330 is under the 360 GitHub enforces.
     timeout-minutes: 330
     env:
+      # Empty on a push, where workflow_dispatch inputs do not exist.
+      EXAMPLE: ${{ inputs.example || 'counter' }}
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       # ccache bakes absolute paths into its hash. The workspace and the
       # buildtools under it land at a different path on every runner, so
@@ -145,9 +164,9 @@ jobs:
 
       # --no-lto above is what keeps this linkable in one CI job; the Android
       # engine is large and LTO on top of a cold build is the slowest thing in
-      # the whole flow. Only the counter target, not the whole engine.
+      # the whole flow. One example target, not the whole engine.
       - name: ninja
-        run: ninja -C src/out/android_release_arm64 flutter/rust/examples/counter
+        run: ninja -C src/out/android_release_arm64 "flutter/rust/examples/$EXAMPLE"
 
       # Packaging picks the platform and build-tools out of the CIPD SDK, since
       # make_apk.py's own defaults (android-36.1, 36.0.0) are not the ones
@@ -157,6 +176,7 @@ jobs:
         env:
           ANDROID_SDK_ROOT: ${{ github.workspace }}/src/flutter/third_party/android_tools/sdk
         run: |
+          echo "packaging $EXAMPLE"
           ls -la src/out/android_release_arm64/*.so
           ls src/flutter/third_party/android_tools/sdk/platforms/
           ls src/flutter/third_party/android_tools/sdk/build-tools/
@@ -169,7 +189,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: counter-apk-arm64
+          name: ${{ inputs.example || 'counter' }}-apk-arm64
           path: src/out/android_release_arm64/apk/*.apk
           if-no-files-found: error
           retention-days: 14
