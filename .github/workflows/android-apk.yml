@@ -166,7 +166,9 @@ jobs:
       # engine is large and LTO on top of a cold build is the slowest thing in
       # the whole flow. One example target, not the whole engine.
       - name: ninja
-        run: ninja -C src/out/android_release_arm64 "flutter/rust/examples/$EXAMPLE"
+        run: |
+          ninja -C src/out/android_release_arm64 "flutter/rust/examples/$EXAMPLE"
+          du -sh src/out
 
       # Packaging picks the platform and build-tools out of the CIPD SDK, since
       # make_apk.py's own defaults (android-36.1, 36.0.0) are not the ones

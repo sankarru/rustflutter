@@ -28,6 +28,15 @@ name: android-shared-engine
 
 on:
   workflow_dispatch:
+    inputs:
+      slimpeller:
+        description: >-
+          Impeller only. Off means Skia Ganesh on GLES, which is what this build
+          produced until it was noticed that the README's "Impeller on the GPU
+          (GLES via ANGLE)" described nothing that was actually being compiled.
+        type: choice
+        default: 'true'
+        options: ['true', 'false']
   push:
     branches: [master]
     paths:
@@ -51,6 +60,9 @@ jobs:
       # like it came from a different compiler and nothing ever hits.
       CCACHE_COMPILERCHECK: "content"
       CCACHE_MAXSIZE: "5G"
+      # Empty on a push, where workflow_dispatch inputs do not exist. A push
+      # builds the Impeller engine, which is the configuration under test.
+      SLIMPELLER: ${{ inputs.slimpeller || 'true' }}
 
     steps:
       - name: Checkout
@@ -105,7 +117,12 @@ jobs:
       - name: gn gen
         run: |
           cd src
+          # Empty when off, which is how this flag is a boolean.
+          SLIM=""
+          if [ "$SLIMPELLER" = "true" ]; then SLIM="--slimpeller"; fi
+          echo "slimpeller=$SLIMPELLER ($SLIM)"
           vpython3 flutter/tools/gn \
+            $SLIM \
             --android \
             --android-cpu arm64 \
             --runtime-mode=release \
@@ -153,7 +170,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: rustflutter-engine-arm64
+          name: rustflutter-engine-arm64-sl${{ inputs.slimpeller || 'true' }}
           path: engine/
           if-no-files-found: error
           retention-days: 30
