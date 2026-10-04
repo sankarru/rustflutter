@@ -31,3 +31,11 @@ rustflutter = { path = "../../rustflutter" }
 # so there is nothing to borrow, and this has to cross-compile to
 # aarch64-linux-android from the NDK alone.
 ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
+
+# Android platform capabilities the engine's own host does not provide.
+# default-features = false because its `default` is empty and every capability is
+# opt-in anyway; naming the features explicitly is what keeps the Kotlin, the
+# manifest and the .so down to what this application actually uses.
+mobile-sentinel = { version = "0.1.4", default-features = false, features = [
+  "permissions",
+] }

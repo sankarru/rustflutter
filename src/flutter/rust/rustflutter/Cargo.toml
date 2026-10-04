@@ -24,9 +24,23 @@ path = "src/lib.rs"
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(rustflutter_stubs)'] }
 
-# None, and not by accident. The framework talks to the engine through the C
-# ABI in `flutter/rust/ffi`, which is linked in rather than compiled here, so
-# there is nothing for Cargo to fetch. An application gets the C++ side by
-# linking `rustflutter_engine.lib`; see the `build.rs` that `rustflutter create`
-# writes.
+# None on the host, and not by accident. The framework talks to the engine
+# through the C ABI in `flutter/rust/ffi`, which is linked in rather than
+# compiled here, so there is nothing for Cargo to fetch. An application gets
+# the C++ side by linking `rustflutter_engine.lib`; see the `build.rs` that
+# `rustflutter create` writes.
 [dependencies]
+
+# Android only: the host side of the hybrid. `RustflutterActivity` hands its
+# own `Activity` to `nativeInitNdkContext` (see `src/android_host.rs`), which
+# seeds `ndk_context` so capability crates (mobile-sentinel) can reach the JVM
+# and the Activity from any thread. Without it their `android_context()` call
+# panics the first time a capability touches JNI.
+#
+# `cfg(target_os)`-gated, so host builds, the crate's own `#[test]` binary and
+# the GN build (which compiles `src/lib.rs` directly and never reads this
+# file) never see these. If GN ever compiles the framework *for Android*,
+# these two have to be added to that GN target too -- same rule as above.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"

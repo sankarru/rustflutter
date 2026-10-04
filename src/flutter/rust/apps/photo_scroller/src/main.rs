@@ -48,7 +48,8 @@ use rustflutter::painting::Image;
 use rustflutter::prelude::*;
 use rustflutter::render::{CrossAxisAlignment, MainAxisAlignment, MainAxisSize, RenderBox};
 use rustflutter::widgets::{
-    ClipRRect, ColoredBox, Column, ImageView, ListView, Padding, Pointer, Row, SizedBox, Text,
+    ClipRRect, ColoredBox, Column, Expanded, ImageView, ListView, Padding, Pointer, Row, SizedBox,
+    Text,
 };
 
 /// Asked for at the size they are drawn at, so the decode is cheap: a decode
@@ -86,6 +87,24 @@ const MAX_STEP: f32 = 48.0;
 /// Ceiling on one response, so a wrong URL cannot fill memory.
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
 
+/// A permission worth showing, because it is one the engine's own host cannot
+/// ask for: the platform channels cover clipboard, settings and lifecycle, but a
+/// runtime permission request is a dialog plus a result, and nothing in the
+/// embedder provides one. `android.permission.CAMERA` is the example.
+const CAMERA: &str = "android.permission.CAMERA";
+
+/// Named so the packager declares it, not read anywhere: the photographs load
+/// over the network, and Android refuses every socket an app has not asked
+/// for. A requirement that lives with the code that has it, rather than on a
+/// build command line nobody re-reads.
+#[allow(dead_code)]
+const INTERNET: &str = "android.permission.INTERNET";
+
+/// How long a tap on the permission card keeps frames coming: the grant
+/// arrives asynchronously, and past this the card stops spending frames on an
+/// answer that is not coming (the user dismissed the dialog, or worse).
+const PERMISSION_WATCH: Duration = Duration::from_secs(30);
+
 /// Photographs, by id. `picsum.photos` serves real photographs and takes the
 /// size in the path, so the bytes on the wire are the size drawn.
 const PHOTOS: &[(&str, &str)] = &[
@@ -108,6 +127,7 @@ fn url_for(id: &str) -> String {
 const BACKGROUND: Color = Color::rgb(0x0D, 0x11, 0x17);
 const TEXT: Color = Color::rgb(0xE6, 0xED, 0xF3);
 const MUTED: Color = Color::rgb(0x9A, 0xAB, 0xC0);
+const ACCENT: Color = Color::rgb(0x54, 0xC5, 0xF8);
 const PLACEHOLDER: Color = Color::rgb(0x1B, 0x22, 0x2C);
 
 // -- Crossing the thread boundary ---------------------------------------------
@@ -186,6 +206,12 @@ struct Io {
     viewport: f32,
     /// Only so a fling can notice a long gap between frames and not jump.
     last: Option<Instant>,
+    /// Watching the camera permission after the user tapped the card: the
+    /// grant arrives asynchronously (the system dialog), so builds keep
+    /// coming -- the same `set_state` + `request_frame` mechanism a fling or
+    /// an outstanding fetch uses -- until the status flips or this deadline
+    /// passes. `None` means nobody tapped and no frames are spent on it.
+    watch_permission_until: Option<Instant>,
 }
 
 impl Io {
@@ -198,6 +224,7 @@ impl Io {
             fling: 0.0,
             viewport: 800.0,
             last: None,
+            watch_permission_until: None,
         }
     }
 
@@ -308,6 +335,31 @@ impl StatefulComponent for Page {
             context.request_frame();
         }
 
+        // While the camera permission is being watched (the user tapped the
+        // card and the system dialog is up), builds keep coming so the line
+        // flips the frame the grant lands rather than on the next scroll. The
+        // dialog is answered out-of-band, so without this the card would lie
+        // until something else rebuilt.
+        let watching = io
+            .watch_permission_until
+            .map(|until| {
+                let granted = matches!(
+                    mobile_sentinel::permissions::status(CAMERA),
+                    mobile_sentinel::PermissionState::Granted
+                );
+                if granted || Instant::now() > until {
+                    io.watch_permission_until = None;
+                    false
+                } else {
+                    true
+                }
+            })
+            .unwrap_or(false);
+        if watching {
+            handle.set_state(|()| ());
+            context.request_frame();
+        }
+
         // A snapshot rather than the render objects themselves: the closure
         // below is `Fn`, so it may be called more than once for one build, and
         // a ListView cannot be rebuilt from a moved-in one.
@@ -345,15 +397,91 @@ impl StatefulComponent for Page {
                 release_handle.set_state(|()| ());
             });
 
+        // The card is its own tap region, inside the scroll region: a tap does
+        // not travel, so the drag handlers above never fire for it, and a drag
+        // is not a tap, so this never fires for a scroll. Tapping asks the
+        // system for the permission and starts the watch that flips this line
+        // when the answer arrives. Cloned out here because the closure below
+        // outlives this build and cannot borrow `self`.
+        let tap_io = self.io.clone();
+
         leaf(move || {
-            let mut list = ListView::new().with_spacing(CARD_SPACING).with_offset(offset);
-            for (caption, image) in &cards {
-                list = list.push(card(caption, image.as_ref()));
-            }
-            Pointer::new(1, Padding::new(EdgeInsets::all(12.0), list))
-                .with_handlers(handlers.clone())
+            // Read on every build, so the caption is the truth at this frame rather
+        // than whatever it was when the page was first built.
+        let granted = matches!(
+            mobile_sentinel::permissions::status(CAMERA),
+            mobile_sentinel::PermissionState::Granted
+        );
+        let state_line = if granted {
+            "camera: granted"
+        } else {
+            "camera: not granted — tap to request"
+        };
+
+        // The card is its own tap region, inside the scroll region: a tap does
+        // not travel, so the drag handlers above never fire for it, and a drag
+        // is not a tap, so this never fires for a scroll. Tapping asks the
+        // system for the permission and starts the watch that flips this line
+        // when the answer arrives.
+        let tap_handle = handle.clone();
+        // Cloned per build: the tap closure moves its own copy, and this
+        // closure is `Fn`, so it cannot give its capture away.
+        let tap_io = tap_io.clone();
+        let card_tap = PointerHandlers::new().with_tap(move |_| {
+            mobile_sentinel::permissions::request(CAMERA);
+            tap_io.borrow_mut().watch_permission_until =
+                Some(Instant::now() + PERMISSION_WATCH);
+            tap_handle.set_state(|()| ());
+        });
+
+        let mut list = ListView::new().with_spacing(CARD_SPACING).with_offset(offset);
+        for (caption, image) in &cards {
+            list = list.push(card(caption, image.as_ref()));
+        }
+        // The permission banner sits above the scroll region, not in it: a
+        // request control that scrolls off the top cannot be tapped, which is
+        // exactly what happened before it was pinned here.
+        Column::new()
+            .with_spacing(CARD_SPACING)
+            .push(Pointer::new(2, permission_card(state_line)).with_handlers(card_tap))
+            .push_flex(Expanded::new(
+                Pointer::new(
+                    1,
+                    Padding::new(EdgeInsets::all(12.0), list),
+                )
+                .with_handlers(handlers.clone()),
+            ))
         })
     }
+}
+
+/// The permission line: a caption over a placeholder-sized box, so the card
+/// rhythm of the photographs is not broken by it.
+fn permission_card(state_line: &str) -> Box<dyn RenderBox> {
+    Box::new(
+        Column::new()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Start)
+            .push(
+                ClipRRect::new(
+                    CORNER,
+                    ColoredBox::new(
+                        PLACEHOLDER,
+                        Column::new()
+                            .with_main_axis_size(MainAxisSize::Min)
+                            .with_main_axis_alignment(MainAxisAlignment::Center)
+                            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                            .push(Text::new(state_line).with_size(13.0).with_color(ACCENT)),
+                    ),
+                ),
+            )
+            .push(SizedBox::new(1.0, 8.0))
+            .push(
+                Text::new("a permission, asked of the platform")
+                    .with_size(13.0)
+                    .with_color(TEXT),
+            ),
+    )
 }
 
 fn card(caption: &str, image: Option<&Rc<Image>>) -> Box<dyn RenderBox> {

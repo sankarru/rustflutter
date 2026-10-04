@@ -52,6 +52,16 @@ SCCACHE_IDLE_TIMEOUT = "600"
 # over this default; without it the [env] table would overwrite the caller's.
 RUSTFLUTTER_ENGINE_OUT = { value = "/home/flux/rustflutter/engine_arm64", relative = false, force = false }
 
+# C dependencies (ring, for rustls) are built by cc-rs, which does not read the
+# [target.*] table above -- it looks for CC_<triple> / CC_<triple with dashes>
+# and falls back to a bare `<triple>-clang` on PATH when neither is set. Without
+# these two, `cargo build` reaches the Rust code fine and then fails inside a
+# build script trying to find `aarch64-linux-android-clang`. Set here rather
+# than in the caller's environment so the workspace builds from a clean shell.
+# force = false, so an explicit CC in the environment still wins.
+CC_aarch64_linux_android = { value = "/home/flux/Android/ndk/r29/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang", relative = false, force = false }
+AR_aarch64_linux_android = { value = "/home/flux/Android/ndk/r29/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar", relative = false, force = false }
+
 # NDK r29's compiler runtime, for libunwind.a. Rust's standard library unwinds;
 # the engine is built -fno-exceptions and links -nostdlib so it supplies none of
 # that, and an application is a cdylib with nothing else to. Static, so it adds

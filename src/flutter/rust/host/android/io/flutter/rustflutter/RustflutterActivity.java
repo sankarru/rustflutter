@@ -178,6 +178,11 @@ public class RustflutterActivity extends Activity implements SurfaceHolder.Callb
   private boolean mStarted;
   private boolean mSurfaceReady;
 
+  // ndk_context is process state: seeding it twice trips its exactly-once
+  // assert, so onCreate -- which Android may call again on the same process --
+  // goes through this once.
+  private static boolean sNdkContextInit = false;
+
   // -- Lifecycle --------------------------------------------------------------
 
   @Override
@@ -207,6 +212,19 @@ public class RustflutterActivity extends Activity implements SurfaceHolder.Callb
       Log.e(TAG, "Could not load lib" + library + ".so", error);
       finish();
       return;
+    }
+
+    // Hand the Activity to native code before anything can need it. Capability
+    // crates read it out of ndk_context on first JNI use; an .so built before
+    // the framework grew this symbol throws here instead of dying later, which
+    // is why the call is guarded rather than assumed.
+    if (!sNdkContextInit) {
+      try {
+        nativeInitNdkContext(this);
+        sNdkContextInit = true;
+      } catch (UnsatisfiedLinkError error) {
+        Log.w(TAG, "nativeInitNdkContext missing; capability JNI will fail", error);
+      }
     }
 
     mView = new HostView(this);
@@ -1722,6 +1740,14 @@ public class RustflutterActivity extends Activity implements SurfaceHolder.Callb
   private AccessibilityManager.TouchExplorationStateChangeListener mTouchExplorationListener;
 
   // -- The native half --------------------------------------------------------
+
+  // Seeds ndk_context with the VM and this Activity, so capability crates
+  // (mobile-sentinel) can reach JNI from threads the JVM never called. The
+  // symbol lives in the application's own library, compiled in from the
+  // framework's android_host module -- not in the engine, which knows nothing
+  // about it. Called at most once per process (sNdkContextInit): ndk_context
+  // asserts its initializer runs exactly once.
+  private static native void nativeInitNdkContext(Activity activity);
 
   private static native void nativeSurfaceCreated(
       Surface surface, int width, int height, float devicePixelRatio, float refreshRate);

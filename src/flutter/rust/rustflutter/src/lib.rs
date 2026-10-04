@@ -23,6 +23,12 @@
 #[cfg(any(test, rustflutter_stubs))]
 mod engine_test_stubs;
 
+// Android host glue (the Activity's native entry points). Target-gated so the
+// host test binary, stubs builds and the GN build never compile it -- and so
+// its `jni` / `ndk-context` dependencies stay Android-only in Cargo.toml.
+#[cfg(target_os = "android")]
+pub mod android_host;
+
 pub mod about;
 pub mod action_buttons;
 pub mod actions;

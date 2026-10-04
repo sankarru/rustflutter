@@ -351,8 +351,52 @@ background with light-grey captions on it.
 fling stored the same quantity and subtracted it, so a flick scrolled back the
 way it came. See `Io::step_fling`.
 
-## Still open
+## Capabilities: the mobile-sentinel hybrid
 
+rustflutter stays the host. `mobile-sentinel` (currently the `permissions`
+feature only) contributes capability code *underneath* it: its Rust links
+into the app's `.so`, its Kotlin compiles into the APK's dex, its init
+provider merges into the manifest. There is deliberately no sentinel
+`Application`, no sentinel `Activity`, no Gradle.
+
+**The capability call dies without `ndk_context`.** Sentinel reaches JNI
+through its own `JNI_OnLoad` VM cache, but resolving its helper classes from
+a worker thread falls back to the Activity's classloader, which needs
+`ndk_context` -- and nothing initialises that in a custom host. The symptom
+is `android context was not initialized` panicking the draw thread: a native
+abort, in the tombstone, not logcat. The fix is host-side, in two halves that
+must both exist: `RustflutterActivity.onCreate` calls
+`nativeInitNdkContext(this)` (once per process; `ndk_context` asserts
+exactly-once), and the framework's `android_host` module implements it by
+seeding `ndk_context` with the VM and a leaked `GlobalRef` to the Activity.
+The JVM finds the symbol by dynamic lookup in the already-loaded app
+library, so no engine change is needed.
+
+**The provider name must be qualified.** Sentinel's core manifest declares
+`android:name=".SentinelCoreInitializer"`, resolved against the *library*
+namespace under Gradle. Spliced raw into the app manifest it resolves
+against the app package instead, and the provider install dies with
+`ClassNotFoundException` before `Application.onCreate`. Qualify it to
+`com.mobilesentinel.*` at splice time.
+
+**A permission nobody declared shows no dialog.** `requestPermissions` for a
+permission missing from the manifest is an instant silent denial. The app's
+own `uses-permission` entries are the declaration; `status()` before that
+fix read `Denied` forever and no tap could change it. Check with `aapt2 dump xmltree`
+(see [Verifying a permission needs `aapt2`](#verifying-a-permission-needs-aapt2-not-grep)), not by tapping.
+
+**The request control must not scroll away.** The permission card started as
+the first list item; any scroll put it off screen and taps hit photographs.
+It is pinned above the scroll region now. The grant arrives asynchronously,
+so a tap starts a bounded watch (per-frame rebuilds, same mechanism as a
+fling) that flips the line when the status changes.
+
+The other packager that knows all of this is acs `--rust`, which derives the
+permissions from the sources, compiles the sentinel Kotlin itself, and
+writes the manifest -- `INTERNET` included, as a named `const` next to the
+code that needs it, so the requirement lives with its reason.
+
+## Still open
 - `re2` and `spring_animation` are still referenced by the build graph with no
   `DEPS` entry. Unreachable from an Android build; a web or iOS build fails.
 - Frame cost is unmeasured. `RUSTFLUTTER_FRAME_STATS=1` reports per-phase
