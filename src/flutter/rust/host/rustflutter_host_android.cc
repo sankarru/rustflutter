@@ -1754,7 +1754,7 @@ class RustflutterSurfaceTexture final : public flutter::Texture {
     }
     JNIEnv* env = fml::jni::AttachCurrentThread();
     jclass cls = env->GetObjectClass(surface_texture_.obj());
-    jmethodID update = env->GetMethodID(cls, "updateTexImage", "()V", false);
+    jmethodID update = env->GetMethodID(cls, "updateTexImage", "()V");
     env->CallVoidMethod(surface_texture_.obj(), update);
     if (env->ExceptionCheck()) {
       env->ExceptionClear();
@@ -1793,7 +1793,7 @@ class RustflutterSurfaceTexture final : public flutter::Texture {
     }
     JNIEnv* env = fml::jni::AttachCurrentThread();
     jclass cls = env->GetObjectClass(surface_texture_.obj());
-    jmethodID attach = env->GetMethodID(cls, "attachToGLContext", "(I)V", false);
+    jmethodID attach = env->GetMethodID(cls, "attachToGLContext", "(I)V");
     env->CallVoidMethod(surface_texture_.obj(), attach, handle.value());
     if (env->ExceptionCheck()) {
       env->ExceptionClear();
