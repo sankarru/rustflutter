@@ -61,6 +61,7 @@ template("android_toolchain") {
     } else if (use_ccache) {
       # ccache only supports compilation, not linking.
       compiler_prefix = "ccache "
+      assembler_prefix = ""
       link_prefix = ""
     } else {
       compiler_prefix = ""
