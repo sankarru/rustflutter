@@ -1753,9 +1753,9 @@ class RustflutterSurfaceTexture final : public flutter::Texture {
       return;
     }
     JNIEnv* env = fml::jni::AttachCurrentThread();
-    jclass cls = env->GetObjectClass(surface_texture_.get());
+    jclass cls = env->GetObjectClass(surface_texture_.obj());
     jmethodID update = env->GetMethodID(cls, "updateTexImage", "()V", false);
-    env->CallVoidMethod(surface_texture_.get(), update);
+    env->CallVoidMethod(surface_texture_.obj(), update);
     if (env->ExceptionCheck()) {
       env->ExceptionClear();
       return;
@@ -1792,9 +1792,9 @@ class RustflutterSurfaceTexture final : public flutter::Texture {
       return;
     }
     JNIEnv* env = fml::jni::AttachCurrentThread();
-    jclass cls = env->GetObjectClass(surface_texture_.get());
+    jclass cls = env->GetObjectClass(surface_texture_.obj());
     jmethodID attach = env->GetMethodID(cls, "attachToGLContext", "(I)V", false);
-    env->CallVoidMethod(surface_texture_.get(), attach, handle.value());
+    env->CallVoidMethod(surface_texture_.obj(), attach, handle.value());
     if (env->ExceptionCheck()) {
       env->ExceptionClear();
     }
@@ -2151,7 +2151,7 @@ Java_io_flutter_rustflutter_VideoBridge_nativeCreateTexture(JNIEnv* env,
   }
   auto id = g_next_video_texture_id.fetch_add(1);
   auto global = fml::jni::ScopedJavaGlobalRef<jobject>(env, surface_texture);
-  state.platform_view->RegisterTexture(std::make_shared<RustflutterSurfaceTexture>(
+  state.platform_view->RegisterTexture(std::make_shared<flutter::RustflutterSurfaceTexture>(
       id, std::move(global),
       std::static_pointer_cast<impeller::ContextGLES>(context)));
   return static_cast<jlong>(id);
