@@ -704,6 +704,12 @@ pub struct LayerCalls {
     /// not drawn" has nothing to be checked against, because the colours and
     /// the geometry go straight into a display list nothing here reads back.
     pub rects: u32,
+    /// External textures composited into the tree (`TextureLayer`).
+    ///
+    /// Counted because the compositor reads them itself: a Texture that
+    /// recorded a display list instead would paint a black box and still pass
+    /// every other counter here.
+    pub texture_layers: u32,
 }
 
 // The three below are what a *dependent* crate's tests read -- this module is
@@ -728,6 +734,7 @@ thread_local! {
             transforms: 0, offsets: 0, clip_rects: 0, clip_rounded_rects: 0,
             clip_paths: 0, opacities: 0, pops: 0, display_lists: 0,
             retainable: 0, retained: 0, rerecorded: 0, rects: 0,
+            texture_layers: 0,
         }) };
 }
 
@@ -2118,6 +2125,18 @@ pub unsafe extern "C" fn rf_layer_tree_new(width: c_int, height: c_int) -> *mut 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rf_layer_tree_free(tree: *mut RfLayerTree) {
     unsafe { release(tree) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rf_layer_tree_add_texture_layer(
+    _tree: *mut RfLayerTree,
+    _dx: f32,
+    _dy: f32,
+    _width: f32,
+    _height: f32,
+    _texture_id: i64,
+) {
+    note(|calls| calls.texture_layers += 1);
 }
 
 #[unsafe(no_mangle)]

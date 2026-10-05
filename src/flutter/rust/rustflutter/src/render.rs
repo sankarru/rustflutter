@@ -14092,6 +14092,45 @@ mod tests {
     ///
     /// The reset matters: the recorder is thread-local and holds whatever the
     /// previous test painted.
+    /// One box painted into a fresh tree, with the layer counters read back.
+    fn texture_layers_while_painting(root: &mut dyn RenderBox) -> crate::engine_test_stubs::LayerCalls {
+        crate::engine_test_stubs::reset_layer_calls();
+        let mut layers = LayerTree::new(1000, 1000);
+        {
+            let mut context = PaintContext::new(&mut layers, Size::new(1000.0, 1000.0));
+            root.paint(&mut context, Offset::ZERO);
+        }
+        crate::engine_test_stubs::layer_calls()
+    }
+
+    #[test]
+    fn a_texture_composites_a_layer_and_records_no_picture() {
+        // The compositor composites an external texture itself. A Texture that
+        // drew into a canvas would produce a display list and a black box --
+        // and every other counter here would be satisfied, which is why this
+        // checks both numbers rather than one.
+        let mut texture = RenderTexture::new(7);
+        texture.layout(BoxConstraints::tight(320.0, 213.0));
+        let calls = texture_layers_while_painting(&mut texture);
+        assert_eq!(calls.texture_layers, 1, "one TextureLayer for one texture");
+        assert_eq!(
+            calls.display_lists, 0,
+            "an external texture is not a recorded picture"
+        );
+        assert_eq!(texture.size(), Size::new(320.0, 213.0));
+    }
+
+    #[test]
+    fn a_texture_with_no_size_does_not_composite_anything() {
+        // Zero is what an unconstrained child lays out to before its parent has
+        // said anything; adding a layer with no extent composites nothing and
+        // is not worth a raster pass.
+        let mut texture = RenderTexture::new(7);
+        texture.layout(BoxConstraints::loose(0.0, 0.0));
+        let calls = texture_layers_while_painting(&mut texture);
+        assert_eq!(calls.texture_layers, 0);
+    }
+
     fn painted(image: RenderImage) -> Vec<crate::engine_test_stubs::Drawn> {
         let mut image = image;
         image.layout(BoxConstraints::loose(1000.0, 1000.0));
