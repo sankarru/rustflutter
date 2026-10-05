@@ -554,6 +554,19 @@ void rf_layer_tree_push_backdrop_blur(RfLayerTree* tree,
 // Blurs the layer's own subtree.
 RF_EXPORT
 void rf_layer_tree_push_blur(RfLayerTree* tree, float sigma_x, float sigma_y);
+
+// Adds an external texture to the layer currently open. The texture id is the
+// one the embedder registered with the shell's texture registry; the rasterizer
+// composites it at `(dx, dy)` sized to `width x height` without this tree
+// recording anything, so an external producer (a video frame) can change
+// between frames.
+RF_EXPORT
+void rf_layer_tree_add_texture_layer(RfLayerTree* tree,
+                                     float dx,
+                                     float dy,
+                                     float width,
+                                     float height,
+                                     int64_t texture_id);
 RF_EXPORT
 void rf_layer_tree_pop(RfLayerTree* tree);
 

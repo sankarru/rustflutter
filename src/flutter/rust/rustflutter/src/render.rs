@@ -935,6 +935,16 @@ impl<'a> PaintContext<'a> {
     }
 
     /// Adds a layer kept from an earlier frame, at `offset`.
+    /// Composites an external texture in the layer currently open, at `offset`
+    /// and the given `size`. Nothing is recorded into a canvas: the texture is
+    /// composited by the rasterizer directly, which is what lets a video frame
+    /// change without re-recording this subtree.
+    pub fn add_texture_layer(&mut self, offset: Offset, size: Size, texture_id: i64) {
+        self.flush();
+        self.tree
+            .add_texture_layer(offset.dx, offset.dy, size.width, size.height, texture_id);
+    }
+
     pub fn add_retained(&mut self, layer: &crate::engine::RetainedLayer, offset: Offset) {
         // Whatever is being recorded has to be closed first, or it would land
         // on top of a subtree that was painted before it.
@@ -5244,6 +5254,62 @@ impl RenderBox for RenderImage {
 
     fn max_intrinsic_height(&self, _width: f32) -> f32 {
         self.natural().height
+    }
+}
+
+// -- External texture ---------------------------------------------------------
+
+/// An external texture rendered straight into the layer tree, upstream's
+/// `Texture` widget / `RenderTexture`.
+///
+/// The compositor does the work, not a canvas: a video frame lands in the
+/// registered texture and shows up without this subtree being re-recorded,
+/// which is why there is no draw call here at all.
+pub struct RenderTexture {
+    texture_id: i64,
+    size: Size,
+}
+
+impl RenderTexture {
+    pub fn new(texture_id: i64) -> RenderTexture {
+        RenderTexture {
+            texture_id,
+            size: Size::ZERO,
+        }
+    }
+
+    /// Sets the size the texture is composited at. Zero means "whatever the
+    /// constraints say", which is what an unconstrained child wants.
+    pub fn with_size(mut self, width: f32, height: f32) -> RenderTexture {
+        self.size = Size::new(width, height);
+        self
+    }
+}
+
+impl RenderBox for RenderTexture {
+    fn layout(&mut self, constraints: BoxConstraints) -> Size {
+        let chosen = if self.size.width > 0.0 && self.size.height > 0.0 {
+            constraints.constrain(self.size)
+        } else {
+            constraints.biggest()
+        };
+        self.size = chosen;
+        chosen
+    }
+
+    fn size(&self) -> Size {
+        self.size
+    }
+
+    fn paint(&self, context: &mut PaintContext, offset: Offset) {
+        if self.size.width <= 0.0 || self.size.height <= 0.0 {
+            return;
+        }
+        context.add_texture_layer(offset, self.size, self.texture_id);
+    }
+
+    fn hit_test_self(&self, _position: Offset) -> bool {
+        true
     }
 }
 

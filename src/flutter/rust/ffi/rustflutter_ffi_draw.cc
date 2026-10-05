@@ -35,6 +35,7 @@
 #include "flutter/flow/layers/image_filter_layer.h"
 #include "flutter/flow/layers/opacity_layer.h"
 #include "flutter/flow/layers/transform_layer.h"
+#include "flutter/flow/layers/texture_layer.h"
 #include "flutter/fml/logging.h"
 #include "flutter/fml/mapping.h"
 #include "flutter/rust/ffi/rustflutter_ffi_internal.h"
@@ -1034,6 +1035,20 @@ void rf_layer_tree_push_blur(RfLayerTree* tree, float sigma_x, float sigma_y) {
   tree->Push(std::make_shared<flutter::ImageFilterLayer>(
       flutter::DlImageFilter::MakeBlur(sigma_x, sigma_y,
                                        flutter::DlTileMode::kDecal)));
+}
+
+void rf_layer_tree_add_texture_layer(RfLayerTree* tree,
+                                     float dx,
+                                     float dy,
+                                     float width,
+                                     float height,
+                                     int64_t texture_id) {
+  if (tree == nullptr || width <= 0 || height <= 0) {
+    return;
+  }
+  tree->Current().Add(std::make_shared<flutter::TextureLayer>(
+      flutter::DlPoint(dx, dy), flutter::DlSize(width, height), texture_id,
+      /*freeze=*/false, flutter::DlImageSampling::kLinear));
 }
 
 void rf_layer_tree_pop(RfLayerTree* tree) {

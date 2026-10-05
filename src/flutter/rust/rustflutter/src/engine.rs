@@ -245,6 +245,14 @@ pub(crate) mod sys {
             path: *const RfPath,
             clip_behavior: c_int,
         );
+        pub fn rf_layer_tree_add_texture_layer(
+            tree: *mut RfLayerTree,
+            dx: f32,
+            dy: f32,
+            width: f32,
+            height: f32,
+            texture_id: i64,
+        );
         pub fn rf_layer_tree_push_opacity(
             tree: *mut RfLayerTree,
             alpha: u8,
@@ -1311,6 +1319,23 @@ impl LayerTree {
     pub fn add_display_list(&mut self, display_list: &DisplayList, offset_x: f32, offset_y: f32) {
         unsafe {
             sys::rf_layer_tree_add_display_list(self.raw, display_list.raw, offset_x, offset_y)
+        };
+    }
+
+    /// Adds an external texture as a `TextureLayer` at `(dx, dy)` sized to
+    /// `width x height`. The texture is owned by the compositor, not this tree:
+    /// a video frame uploaded into it between frames shows up without the layer
+    /// being re-recorded.
+    pub fn add_texture_layer(&mut self, dx: f32, dy: f32, width: f32, height: f32, texture_id: i64) {
+        unsafe {
+            sys::rf_layer_tree_add_texture_layer(
+                self.raw,
+                dx,
+                dy,
+                width,
+                height,
+                texture_id,
+            )
         };
     }
 

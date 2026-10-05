@@ -2047,6 +2047,23 @@ impl ImageView {
     }
 }
 
+/// Composites an external texture, upstream's `Texture` widget. The id comes
+/// from whatever registered the texture with the shell -- a video surface, in
+/// practice -- and the compositor reads it rather than a canvas.
+pub struct Texture;
+
+impl Texture {
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new(texture_id: i64) -> crate::render::RenderTexture {
+        crate::render::RenderTexture::new(texture_id)
+    }
+
+    #[allow(clippy::new_ret_no_self)]
+    pub fn sized(texture_id: i64, width: f32, height: f32) -> crate::render::RenderTexture {
+        crate::render::RenderTexture::new(texture_id).with_size(width, height)
+    }
+}
+
 /// Takes the full width on offer, so that siblings in a column line up rather
 /// than each shrinking to its own contents.
 pub struct FullWidth;

@@ -71,6 +71,10 @@
 #include "flutter/fml/task_runner.h"
 #include "flutter/fml/time/time_point.h"
 #include "flutter/impeller/renderer/context.h"
+#include "flutter/impeller/renderer/backend/gles/context_gles.h"
+#include "flutter/impeller/renderer/backend/gles/texture_gles.h"
+#include "flutter/impeller/display_list/dl_image_impeller.h"
+#include "flutter/impeller/core/texture_descriptor.h"
 #include "flutter/lib/ui/window/key_data.h"
 #include "flutter/lib/ui/window/key_data_packet.h"
 #include "flutter/lib/ui/window/platform_message.h"
@@ -1721,6 +1725,92 @@ class HostPlatformView final : public PlatformView,
 };
 
 //------------------------------------------------------------------------------
+/// An Impeller GL external texture backed by an android SurfaceTexture.
+///
+/// The engine's own SurfaceTextureExternalTexture path wants a
+/// PlatformViewAndroidJNI facade it gets from the embedding engine; the
+/// rustflutter host has no FlutterJNI, so this is the same texture without the
+/// facade: the Java calls it needs go straight through JNI. Everything else --
+/// the external OES descriptor, the Impeller texture, the compositor texture
+/// registry -- is the engine's own machinery.
+class RustflutterSurfaceTexture final : public flutter::Texture {
+ public:
+  RustflutterSurfaceTexture(
+      int64_t id,
+      fml::jni::ScopedJavaGlobalRef<jobject> surface_texture,
+      std::shared_ptr<impeller::ContextGLES> context)
+      : flutter::Texture(id),
+        surface_texture_(std::move(surface_texture)),
+        context_(std::move(context)) {}
+
+  ~RustflutterSurfaceTexture() override = default;
+
+  void Paint(PaintContext& context,
+             const DlRect& bounds,
+             bool freeze,
+             const DlImageSampling sampling) override {
+    if (!texture_) {
+      return;
+    }
+    JNIEnv* env = fml::jni::AttachCurrentThread();
+    jclass cls = env->GetObjectClass(surface_texture_.get());
+    jmethodID update = env->GetMethodID(cls, "updateTexImage", "()V", false);
+    env->CallVoidMethod(surface_texture_.get(), update);
+    if (env->ExceptionCheck()) {
+      env->ExceptionClear();
+      return;
+    }
+    sk_sp<flutter::DlImage> image = impeller::DlImageImpeller::Make(texture_);
+    context.canvas->DrawImage(image, DlPoint{0.0, 0.0}, sampling, context.paint);
+  }
+
+  void MarkNewFrameAvailable() override {
+    // The frame is already in the SurfaceTexture; the compositor asks for a
+    // new frame through PlatformView::MarkTextureFrameAvailable.
+  }
+
+  void OnTextureUnregistered() override {
+    OnGrContextDestroyed();
+  }
+
+  void OnGrContextCreated() override {
+    if (texture_) {
+      return;
+    }
+    impeller::TextureDescriptor desc;
+    desc.type = impeller::TextureType::kTextureExternalOES;
+    desc.storage_mode = impeller::StorageMode::kDevicePrivate;
+    desc.format = impeller::PixelFormat::kR8G8B8A8UNormInt;
+    desc.size = {1, 1};
+    desc.mip_count = 1;
+    texture_ = std::make_shared<impeller::TextureGLES>(context_->GetReactor(), desc);
+    texture_->MarkContentsInitialized();
+    auto handle = texture_->GetGLHandle();
+    if (!handle.has_value()) {
+      FML_LOG(ERROR) << "rustflutter: could not get a GL handle for a video texture";
+      texture_.reset();
+      return;
+    }
+    JNIEnv* env = fml::jni::AttachCurrentThread();
+    jclass cls = env->GetObjectClass(surface_texture_.get());
+    jmethodID attach = env->GetMethodID(cls, "attachToGLContext", "(I)V", false);
+    env->CallVoidMethod(surface_texture_.get(), attach, handle.value());
+    if (env->ExceptionCheck()) {
+      env->ExceptionClear();
+    }
+  }
+
+  void OnGrContextDestroyed() override {
+    texture_.reset();
+  }
+
+ private:
+  fml::jni::ScopedJavaGlobalRef<jobject> surface_texture_;
+  std::shared_ptr<impeller::ContextGLES> context_;
+  std::shared_ptr<impeller::TextureGLES> texture_;
+};
+
+//------------------------------------------------------------------------------
 /// Everything the JNI entry points reach.
 ///
 /// A singleton because JNI entry points are free functions and an Activity is
@@ -2039,6 +2129,54 @@ Java_io_flutter_rustflutter_RustflutterActivity_nativeSurfaceCreated(
   state.height = height;
   state.device_pixel_ratio = device_pixel_ratio > 0 ? device_pixel_ratio : 1.0;
   flutter::ChoreographerVsyncWaiter::SetRefreshRate(refresh_rate);
+}
+
+namespace {
+std::atomic<int64_t> g_next_video_texture_id{1};
+}
+
+JNIEXPORT jlong JNICALL
+Java_io_flutter_rustflutter_VideoBridge_nativeCreateTexture(JNIEnv* env,
+                                                             jclass clazz,
+                                                             jobject surface_texture) {
+  auto& state = flutter::HostState::Get();
+  if (state.platform_view == nullptr) {
+    FML_LOG(ERROR) << "rustflutter: no platform view yet for a video texture";
+    return -1;
+  }
+  auto context = state.platform_view->GetImpellerContext();
+  if (!context) {
+    FML_LOG(ERROR) << "rustflutter: video textures need the Impeller GL context";
+    return -1;
+  }
+  auto id = g_next_video_texture_id.fetch_add(1);
+  auto global = fml::jni::ScopedJavaGlobalRef<jobject>(env, surface_texture);
+  state.platform_view->RegisterTexture(std::make_shared<RustflutterSurfaceTexture>(
+      id, std::move(global),
+      std::static_pointer_cast<impeller::ContextGLES>(context)));
+  return static_cast<jlong>(id);
+}
+
+JNIEXPORT void JNICALL
+Java_io_flutter_rustflutter_VideoBridge_nativeMarkFrameAvailable(JNIEnv* env,
+                                                                   jclass clazz,
+                                                                   jlong id) {
+  auto& state = flutter::HostState::Get();
+  if (state.platform_view == nullptr) {
+    return;
+  }
+  state.platform_view->MarkTextureFrameAvailable(static_cast<int64_t>(id));
+}
+
+JNIEXPORT void JNICALL
+Java_io_flutter_rustflutter_VideoBridge_nativeDisposeTexture(JNIEnv* env,
+                                                              jclass clazz,
+                                                              jlong id) {
+  auto& state = flutter::HostState::Get();
+  if (state.platform_view == nullptr) {
+    return;
+  }
+  state.platform_view->UnregisterTexture(static_cast<int64_t>(id));
 }
 
 JNIEXPORT void JNICALL

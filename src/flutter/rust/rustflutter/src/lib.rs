@@ -28,6 +28,8 @@ mod engine_test_stubs;
 // its `jni` / `ndk-context` dependencies stay Android-only in Cargo.toml.
 #[cfg(target_os = "android")]
 pub mod android_host;
+#[cfg(target_os = "android")]
+pub mod video;
 
 pub mod about;
 pub mod action_buttons;
