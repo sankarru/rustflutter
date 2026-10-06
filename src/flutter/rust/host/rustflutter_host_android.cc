@@ -1782,6 +1782,13 @@ class RustflutterSurfaceTexture final : public flutter::Texture {
         return;
       }
     }
+    if (!texture_) {
+      // Attach already failed and will not be retried. Without this, Paint fell
+      // through to updateTexImage and then built a DlImage from a null texture,
+      // which segfaulted on the first frame to arrive -- minutes after the
+      // attach failure that actually explains it.
+      return;
+    }
 
     // Latch the newest producer frame. A video frame is exactly that: an
     // external producer writing into a Surface, no bytes crossing here.
@@ -1852,7 +1859,7 @@ class RustflutterSurfaceTexture final : public flutter::Texture {
     texture->MarkContentsInitialized();
 
     auto handle = texture->GetGLHandle();
-    FML_LOG(INFO) << "rustflutter: allocating the video texture " << Id()
+    FML_LOG(WARNING) << "rustflutter: allocating the video texture " << Id()
                   << " on thread " << VideoThreadName()
                   << ", GL handle " << (handle.has_value() ? std::to_string(handle.value()) : "none")
                   << ", valid " << texture->IsValid();
@@ -1889,7 +1896,7 @@ class RustflutterSurfaceTexture final : public flutter::Texture {
       return false;
     }
 
-    FML_LOG(INFO) << "rustflutter: video texture " << Id() << " attached to GL "
+    FML_LOG(WARNING) << "rustflutter: video texture " << Id() << " attached to GL "
                   << handle.value() << " on thread " << VideoThreadName();
     texture_ = std::move(texture);
     return true;
