@@ -95,8 +95,8 @@ source_set("host") {
       # (and with it the Dart snapshot tree this fork does not have). The JNI
       # facade it would provide is the five SurfaceTexture methods, which the
       # host implements directly -- see RustflutterSurfaceTextureJNI.
-      "../shell/platform/android/surface_texture_external_texture.cc",
-      "../shell/platform/android/surface_texture_external_texture_gl_impeller.cc",
+      "../../shell/platform/android/surface_texture_external_texture.cc",
+      "../../shell/platform/android/surface_texture_external_texture_gl_impeller.cc",
     ]
   } else if (is_mac) {
     sources += [
