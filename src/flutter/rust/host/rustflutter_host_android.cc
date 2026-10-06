@@ -1859,7 +1859,7 @@ class RustflutterSurfaceTexture final : public flutter::Texture {
     texture->MarkContentsInitialized();
 
     auto handle = texture->GetGLHandle();
-    FML_LOG(WARNING) << "rustflutter: allocating the video texture " << Id()
+    FML_LOG(ERROR) << "rustflutter: allocating the video texture " << Id()
                   << " on thread " << VideoThreadName()
                   << ", GL handle " << (handle.has_value() ? std::to_string(handle.value()) : "none")
                   << ", valid " << texture->IsValid();
@@ -1882,6 +1882,18 @@ class RustflutterSurfaceTexture final : public flutter::Texture {
       FML_LOG(ERROR) << "rustflutter: no class for the video SurfaceTexture";
       return false;
     }
+    // The SurfaceTexture arrives already in an attached state -- the
+    // `new SurfaceTexture(0)` constructor attaches it to texture name 0 --
+    // so attachToGLContext alone fails with "already attached to a context".
+    // Upstream's SurfaceTextureWrapper does the same two-step (detach, then
+    // attach) for exactly this reason; the detach is a no-op if the framework
+    // disagrees about the state, hence the exception is cleared either way.
+    jmethodID detach = env->GetMethodID(cls, "detachFromGLContext", "()V");
+    env->CallVoidMethod(surface_texture_.obj(), detach);
+    if (env->ExceptionCheck()) {
+      env->ExceptionClear();
+    }
+
     jmethodID attach = env->GetMethodID(cls, "attachToGLContext", "(I)V");
     env->CallVoidMethod(surface_texture_.obj(), attach, handle.value());
     const bool threw = env->ExceptionCheck();
@@ -1896,7 +1908,7 @@ class RustflutterSurfaceTexture final : public flutter::Texture {
       return false;
     }
 
-    FML_LOG(WARNING) << "rustflutter: video texture " << Id() << " attached to GL "
+    FML_LOG(ERROR) << "rustflutter: video texture " << Id() << " attached to GL "
                   << handle.value() << " on thread " << VideoThreadName();
     texture_ = std::move(texture);
     return true;
