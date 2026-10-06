@@ -70,9 +70,11 @@
 #include "flutter/fml/synchronization/waitable_event.h"
 #include "flutter/fml/task_runner.h"
 #include "flutter/fml/time/time_point.h"
+#include "flutter/impeller/core/texture_descriptor.h"
 #include "flutter/impeller/renderer/context.h"
+#include "flutter/impeller/display_list/dl_image_impeller.h"
 #include "flutter/impeller/renderer/backend/gles/context_gles.h"
-#include "flutter/third_party/skia/include/core/SkM44.h"
+#include "flutter/impeller/renderer/backend/gles/texture_gles.h"
 #include "flutter/shell/platform/android/jni/platform_view_android_jni.h"
 #include "flutter/shell/platform/android/surface_texture_external_texture_gl_impeller.h"
 #include "flutter/lib/ui/window/key_data.h"
@@ -1725,96 +1727,100 @@ class HostPlatformView final : public PlatformView,
 };
 
 //------------------------------------------------------------------------------
-/// The JNI facade SurfaceTextureExternalTexture drives, narrowed to the five
-/// methods it actually calls.
+/// An Impeller GL external texture backed by an android SurfaceTexture.
 ///
-/// Upstream's PlatformViewAndroidJNIImpl would do, but it includes
-/// android_shell_holder.h and flutter_main.h -- the whole embedding, which this
-/// fork cannot link (it needs the Dart snapshot tree). These five are the entire
-/// surface between the texture and a SurfaceTexture, and each is a direct call on
-/// android.graphics.SurfaceTexture, which is all the upstream implementation
-/// does underneath. When the platform-view work brings the embedding in, this
-/// becomes PlatformViewAndroidJNIImpl unchanged.
-class RustflutterSurfaceTextureJNI final : public flutter::PlatformViewAndroidJNI {
+/// This is the one place the video path does NOT reuse upstream. The upstream
+/// implementation (SurfaceTextureExternalTexture + its GLImpeller subclass) takes
+/// a full `PlatformViewAndroidJNI`, which has 41 pure virtuals, and the only
+/// implementation of it -- PlatformViewAndroidJNIImpl -- includes
+/// android_shell_holder.h and flutter_main.h. This fork has no embedding (no
+/// FlutterView, no Dart VM), so that interface cannot be satisfied by anything
+/// other than 41 stub methods, which would be a reimplementation of the
+/// embedding wearing upstream's name.
+///
+/// What is reused is everything that matters: the external-OES descriptor, the
+/// Impeller `TextureGLES`, and the compositor texture registry are the engine's
+/// own machinery (this class derives from flutter::Texture and registers through
+/// PlatformView::RegisterTexture). Only the Android side -- attach, update,
+/// detach -- is host code, because a SurfaceTexture is an Android object and the
+/// host owns the Activity.
+///
+/// No transform matrix is read: VideoBridge sets the SurfaceTexture's default
+/// buffer size to the card size, so the producer scales into it and the UV
+/// transform is the identity, which is what lets a two-line paint be correct.
+class RustflutterSurfaceTexture final : public flutter::Texture {
  public:
-  void SurfaceTextureAttachToGLContext(flutter::JavaLocalRef surface_texture,
-                                       int texture_id) override {
-    Attach(surface_texture, texture_id);
-  }
-  bool SurfaceTextureShouldUpdate(flutter::JavaLocalRef surface_texture) override {
-    return !HasFrame(surface_texture);
-  }
-  void SurfaceTextureUpdateTexImage(flutter::JavaLocalRef surface_texture) override {
-    CallVoid(surface_texture, "updateTexImage", "()V");
-  }
-  SkM44 SurfaceTextureGetTransformMatrix(
-      flutter::JavaLocalRef surface_texture) override {
-    float m[16] = {0};
+  RustflutterSurfaceTexture(
+      int64_t id,
+      const fml::jni::ScopedJavaGlobalRef<jobject>& surface_texture,
+      std::shared_ptr<impeller::ContextGLES> context)
+      : flutter::Texture(id),
+        surface_texture_(surface_texture),
+        context_(std::move(context)) {}
+
+  ~RustflutterSurfaceTexture() override = default;
+
+  void Paint(PaintContext& context,
+             const DlRect& bounds,
+             bool freeze,
+             const DlImageSampling sampling) override {
+    if (!texture_) {
+      return;
+    }
+    // updateTexImage latches the newest producer frame. A video frame is exactly
+    // that: an external producer writing into a Surface, no bytes crossing here.
     JNIEnv* env = fml::jni::AttachCurrentThread();
-    auto local = fml::jni::ScopedJavaLocalRef<jobject>(surface_texture);
-    jclass cls = env->GetObjectClass(local.obj());
-    jmethodID id = env->GetMethodID(cls, "getTransformMatrix", "([F)V");
-    env->CallVoidMethod(local.obj(), id, m);
+    jclass cls = env->GetObjectClass(surface_texture_.obj());
+    jmethodID update = env->GetMethodID(cls, "updateTexImage", "()V");
+    env->CallVoidMethod(surface_texture_.obj(), update);
     if (env->ExceptionCheck()) {
       env->ExceptionClear();
-      return {};
+      return;
     }
-    return SkM44::MakeAll(m);
+    sk_sp<flutter::DlImage> image = impeller::DlImageImpeller::Make(texture_);
+    context.canvas->DrawImage(image, DlPoint{0.0, 0.0}, sampling, context.paint);
   }
-  void SurfaceTextureDetachFromGLContext(
-      flutter::JavaLocalRef surface_texture) override {
-    CallVoid(surface_texture, "detachFromGLContext", "()V");
+
+  /// The frame is already in the SurfaceTexture; the compositor asks for the
+  /// redraw through PlatformView::MarkTextureFrameAvailable.
+  void MarkNewFrameAvailable() override {}
+
+  void OnTextureUnregistered() override { OnGrContextDestroyed(); }
+
+  void OnGrContextCreated() override {
+    if (texture_) {
+      return;
+    }
+    impeller::TextureDescriptor desc;
+    desc.type = impeller::TextureType::kTextureExternalOES;
+    desc.storage_mode = impeller::StorageMode::kDevicePrivate;
+    desc.format = impeller::PixelFormat::kR8G8B8A8UNormInt;
+    desc.size = {1, 1};
+    desc.mip_count = 1;
+    texture_ =
+        std::make_shared<impeller::TextureGLES>(context_->GetReactor(), desc);
+    texture_->MarkContentsInitialized();
+    auto handle = texture_->GetGLHandle();
+    if (!handle.has_value()) {
+      FML_LOG(ERROR) << "rustflutter: no GL handle for the video texture";
+      texture_.reset();
+      return;
+    }
+    JNIEnv* env = fml::jni::AttachCurrentThread();
+    jclass cls = env->GetObjectClass(surface_texture_.obj());
+    jmethodID attach = env->GetMethodID(cls, "attachToGLContext", "(I)V");
+    env->CallVoidMethod(surface_texture_.obj(), attach, handle.value());
+    if (env->ExceptionCheck()) {
+      env->ExceptionClear();
+    }
   }
+
+  void OnGrContextDestroyed() override { texture_.reset(); }
 
  private:
-  void CallVoid(JavaLocalRef surface_texture,
-                const char* name,
-                const char* signature) {
-    JNIEnv* env = fml::jni::AttachCurrentThread();
-    auto local = fml::jni::ScopedJavaLocalRef<jobject>(surface_texture);
-    jclass cls = env->GetObjectClass(local.obj());
-    jmethodID id = env->GetMethodID(cls, name, signature);
-    if (id == nullptr) {
-      return;
-    }
-    env->CallVoidMethod(local.obj(), id);
-    if (env->ExceptionCheck()) {
-      env->ExceptionClear();
-    }
-  }
-
-  void Attach(JavaLocalRef surface_texture, int texture_id) {
-    JNIEnv* env = fml::jni::AttachCurrentThread();
-    auto local = fml::jni::ScopedJavaLocalRef<jobject>(surface_texture);
-    jclass cls = env->GetObjectClass(local.obj());
-    jmethodID id = env->GetMethodID(cls, "attachToGLContext", "(I)V");
-    if (id == nullptr) {
-      return;
-    }
-    env->CallVoidMethod(local.obj(), id, texture_id);
-    if (env->ExceptionCheck()) {
-      env->ExceptionClear();
-    }
-  }
-
-  /// Whether the SurfaceTexture has a frame waiting. `updateTimestamp()` is
-  /// zero exactly when nothing has been produced since the last update, which is
-  /// the same question upstream's shouldUpdate answers through FlutterJNI.
-  bool HasFrame(flutter::JavaLocalRef surface_texture) {
-    JNIEnv* env = fml::jni::AttachCurrentThread();
-    auto local = fml::jni::ScopedJavaLocalRef<jobject>(surface_texture);
-    jclass cls = env->GetObjectClass(local.obj());
-    jmethodID id = env->GetMethodID(cls, "getTimestamp", "()J");
-    if (id == nullptr) {
-      return false;
-    }
-    jlong stamp = env->CallLongMethod(local.obj(), id);
-    if (env->ExceptionCheck()) {
-      env->ExceptionClear();
-      return false;
-    }
-    return stamp != 0;
-  }
+  fml::jni::ScopedJavaGlobalRef<jobject> surface_texture_;
+  std::shared_ptr<impeller::ContextGLES> context_;
+  std::shared_ptr<impeller::TextureGLES> texture_;
 };
 
 //------------------------------------------------------------------------------
@@ -2163,12 +2169,10 @@ Java_io_flutter_rustflutter_VideoBridge_nativeCreateTexture(JNIEnv* env,
   // call it on (see the platform-view work). The JNI facade takes a
   // WeakReference<SurfaceTexture>, which is what FlutterRenderer hands it, and
   // calls the real android.graphics.SurfaceTexture methods underneath.
-  auto jni_facade = std::make_shared<RustflutterSurfaceTextureJNI>();
   auto global = fml::jni::ScopedJavaGlobalRef<jobject>(env, surface_texture);
   state.platform_view->RegisterTexture(
-      std::make_shared<flutter::SurfaceTextureExternalTextureGLImpeller>(
-          std::static_pointer_cast<impeller::ContextGLES>(context), id, global,
-          jni_facade));
+      std::make_shared<flutter::RustflutterSurfaceTexture>(
+          id, global, std::static_pointer_cast<impeller::ContextGLES>(context)));
   return static_cast<jlong>(id);
 }
 
