@@ -50,6 +50,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <sstream>
+#include <thread>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -1772,7 +1774,10 @@ class RustflutterSurfaceTexture final : public flutter::Texture {
     // same way, from ProcessFrame, for exactly this reason. Doing it in
     // OnGrContextCreated looks right and silently never draws anything: the
     // player decodes, the screen stays static, and no code complains.
-    if (!texture_) {
+    if (!texture_ && !attach_attempted_) {
+      // Once. Retrying every frame produced hundreds of identical errors a
+      // second, which rotated the first (real) failure out of logcat.
+      attach_attempted_ = true;
       if (!Attach()) {
         return;
       }
@@ -1822,6 +1827,16 @@ class RustflutterSurfaceTexture final : public flutter::Texture {
  private:
   /// Creates the external-OES texture and hands its name to the SurfaceTexture
   /// as its GL context. Returns false if either step failed.
+  /// The calling thread's id, for the attach diagnostics below. This matters
+  /// because Impeller generates the GL texture name on the constructing thread,
+  /// so "which thread called Paint" is the first thing to check when the name
+  /// turns out to be unusable.
+  static std::string VideoThreadName() {
+    std::ostringstream out;
+    out << std::this_thread::get_id();
+    return out.str();
+  }
+
   bool Attach() {
     impeller::TextureDescriptor desc;
     desc.type = impeller::TextureType::kTextureExternalOES;
@@ -1837,8 +1852,20 @@ class RustflutterSurfaceTexture final : public flutter::Texture {
     texture->MarkContentsInitialized();
 
     auto handle = texture->GetGLHandle();
+    FML_LOG(INFO) << "rustflutter: allocating the video texture " << Id()
+                  << " on thread " << VideoThreadName()
+                  << ", GL handle " << (handle.has_value() ? std::to_string(handle.value()) : "none")
+                  << ", valid " << texture->IsValid();
     if (!handle.has_value()) {
       FML_LOG(ERROR) << "rustflutter: the video texture got no GL handle";
+      return false;
+    }
+    if (handle.value() == 0) {
+      // attachToGLContext rejects 0 outright, and Impeller's handle can be 0
+      // when the GL name was never generated -- which happens if this thread
+      // has no context current.
+      FML_LOG(ERROR) << "rustflutter: the video texture got GL name 0; no "
+                        "context is current on this thread";
       return false;
     }
 
@@ -1863,7 +1890,8 @@ class RustflutterSurfaceTexture final : public flutter::Texture {
     }
 
     FML_LOG(INFO) << "rustflutter: video texture " << Id() << " attached to GL "
-                  << handle.value();
+                  << handle.value() << " on thread "
+                  << fml::GetCurrentThreadName();
     texture_ = std::move(texture);
     return true;
   }
@@ -1895,6 +1923,7 @@ class RustflutterSurfaceTexture final : public flutter::Texture {
   fml::jni::ScopedJavaGlobalRef<jobject> surface_texture_;
   std::shared_ptr<impeller::ContextGLES> context_;
   std::shared_ptr<impeller::TextureGLES> texture_;
+  bool attach_attempted_ = false;
 };
 
 //------------------------------------------------------------------------------
