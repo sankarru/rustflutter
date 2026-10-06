@@ -1785,8 +1785,12 @@ class RustflutterSurfaceTexture final : public flutter::Texture {
     }
 
     auto image = impeller::DlImageImpeller::Make(texture_);
-    const DlPoint origin = ToDlPoint(bounds.GetLeftTop());
-    context.canvas->DrawImage(image, origin, sampling, context.paint);
+    // Drawn at the origin, as upstream does for an identity transform. This
+    // host reads no UV matrix on purpose: VideoBridge sets the SurfaceTexture's
+    // default buffer size to the card size, so the producer scales into it and
+    // the transform is the identity -- the same case upstream short-circuits to
+    // a plain DrawImage at 0, 0.
+    context.canvas->DrawImage(image, DlPoint{0, 0}, sampling, context.paint);
   }
 
   /// The frame is already in the SurfaceTexture; the compositor asks for the
