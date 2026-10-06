@@ -430,8 +430,23 @@ pub(crate) mod sys {
 ///
 /// Idempotent. [`crate::App::new`] calls this, so most apps never need to.
 pub fn initialize() {
-    // NULL asks the engine to look for icudtl.dat next to the executable.
-    unsafe { sys::rf_initialize(std::ptr::null()) };
+    // On Android there is no executable directory to fall back on:
+    // fml::paths::GetExecutablePath() returns {false, ""} unconditionally there
+    // (platform/android/paths_android.cc), so passing NULL cannot find
+    // icudtl.dat on this platform at all. Ask Java where the native libraries
+    // were extracted to and use the ICU data shipped beside them.
+    let path = crate::android_host::icu_data_path();
+    let code = unsafe {
+        match path {
+            Some(p) => sys::rf_initialize(p.as_ptr()),
+            // Desktop hosts do have an executable directory, and NULL is the
+            // documented way to ask for it.
+            None => sys::rf_initialize(std::ptr::null()),
+        }
+    };
+    if code != 0 {
+        eprintln!("rf_initialize failed; the text stack has no ICU data");
+    }
 }
 
 /// Makes a font in memory available to every paragraph, under `family`.

@@ -64,3 +64,55 @@ pub unsafe extern "system" fn Java_io_flutter_rustflutter_RustflutterActivity_na
         ndk_context::initialize_android_context(vm_ptr, activity_ptr);
     }
 }
+
+/// The ICU data that ships beside the native libraries, as a C string, or `None`
+/// off Android.
+///
+/// Java knows where the APK's native libraries were extracted to and the engine
+/// has no way to find that on its own: `fml::paths::GetExecutablePath()` is
+/// `{false, ""}` on Android, so the usual "look next to the executable" fallback
+/// cannot resolve. `icudtl.dat` is staged next to the libraries, so joining that
+/// directory with the name the engine hardcodes gives a real path.
+///
+/// Leaked on purpose. It is asked for once during startup and read by the
+/// engine for the life of the process, so handing out a borrowed pointer would
+/// only invite a use-after-free.
+#[cfg(target_os = "android")]
+pub fn icu_data_path() -> Option<std::ffi::CString> {
+    use jni::objects::JObject;
+
+    let ctx = ndk_context::android_context();
+    if ctx.vm().is_null() || ctx.context().is_null() {
+        return None;
+    }
+    let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.ok()?;
+    let mut env = vm.attach_current_thread_permanently().ok()?;
+    // The Activity that seeded ndk_context, and so the ApplicationInfo that
+    // says where the APK's native libraries were extracted.
+    let activity = unsafe { JObject::from_raw(ctx.context() as jni::sys::jobject) };
+    let info = env
+        .call_method(
+            &activity,
+            "getApplicationInfo",
+            "()Landroid/content/pm/ApplicationInfo;",
+            &[],
+        )
+        .ok()?
+        .l()
+        .ok()?;
+    let dir = env
+        .get_field(&JObject::from(info), "nativeLibraryDir", "Ljava/lang/String;")
+        .ok()?
+        .l()
+        .ok()?;
+    let dir: String = env
+        .get_string(&JObject::from(dir).into())
+        .ok()?
+        .into();
+    std::ffi::CString::new(format!("{dir}/icudtl.dat")).ok()
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn icu_data_path() -> Option<std::ffi::CString> {
+    None
+}
