@@ -1,0 +1,31 @@
+# Copyright 2013 The Flutter Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# Stub for a Dart-snapshot import this fork does not have.
+#
+# Upstream, `flutter/shell/platform/android/BUILD.gn` imports this file to name
+# the Dart AOT/JIT snapshot binaries it builds and links. This fork has no Dart
+# VM: `flutter/lib/snapshot/` was never tracked (there is no `dart:` directory,
+# no `packages/`, no Dart SDK in DEPS), so the import cannot resolve -- and GN
+# loads a BUILD.gn file whole, so *every* target in
+# `flutter/shell/platform/android/BUILD.gn` fails to load with the file simply
+# absent. That is not a hypothetical: depending on
+# `//flutter/shell/platform/android:flutter_shell_native_src` -- which is where
+# `PlatformViewAndroid`, `PlatformViewAndroidJNIImpl` and
+# `SurfaceTextureExternalTextureGLImpeller` live, and which the video texture
+# path reuses verbatim -- failed `gn gen` twice on exactly this.
+#
+# The stub defines nothing, which is correct rather than lazy: the targets this
+# fork actually builds reference none of the snapshot variables, so an empty file
+# lets GN parse the BUILD.gn and leaves every Dart-dependent target (snapshot,
+# isolate, flutter_patched_sdk) undefined for anyone who tries to build one.
+#
+# If a Dart-dependent target is ever needed here, this stub has to be replaced
+# with the real gen_snapshot.gni and the Dart subtree restored -- it is a record
+# of what is missing, not a way around it.
+
+declare_args() {
+  # Present so any target that does read an argument still parses; see above.
+  rustflutter_no_dart_snapshot = true
+}
