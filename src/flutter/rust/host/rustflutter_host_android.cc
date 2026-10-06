@@ -2279,13 +2279,34 @@ Java_io_flutter_rustflutter_VideoBridge_nativeCreateTexture(JNIEnv* env,
     return -1;
   }
   auto id = g_next_video_texture_id.fetch_add(1);
-  // Upstream's own two classes, unmodified. PlatformViewAndroid::RegisterSurfaceTexture
-  // does exactly this after RenderSurfaceTextureOnFrameAvailable; the only
-  // reason it is spelled out here is that the host has no PlatformViewAndroid to
-  // call it on (see the platform-view work). The JNI facade takes a
-  // WeakReference<SurfaceTexture>, which is what FlutterRenderer hands it, and
-  // calls the real android.graphics.SurfaceTexture methods underneath.
-  auto global = fml::jni::ScopedJavaGlobalRef<jobject>(env, surface_texture);
+
+  // Java hands over a WeakReference<SurfaceTexture>, which is what
+  // FlutterRenderer passes upstream. The reference is not the texture: calling
+  // attachToGLContext on it looks up the method against
+  // java.lang.ref.WeakReference, finds nothing, and JNI aborts the process with
+  // "mid == null". Dereference once here and keep the SurfaceTexture itself,
+  // which is also the object that owns the producer buffers.
+  jclass ref_class = env->GetObjectClass(surface_texture);
+  jmethodID get = ref_class == nullptr
+                      ? nullptr
+                      : env->GetMethodID(ref_class, "get", "()Ljava/lang/Object;");
+  if (get == nullptr) {
+    FML_LOG(ERROR) << "rustflutter: no WeakReference.get() for the video "
+                      "SurfaceTexture";
+    env->ExceptionClear();
+    return -1;
+  }
+  jobject resolved = env->CallObjectMethod(surface_texture, get);
+  if (env->ExceptionCheck() || resolved == nullptr) {
+    FML_LOG(ERROR) << "rustflutter: the video SurfaceTexture was collected "
+                      "before the texture could attach";
+    env->ExceptionClear();
+    return -1;
+  }
+  auto global = fml::jni::ScopedJavaGlobalRef<jobject>(env, resolved);
+  env->DeleteLocalRef(resolved);
+  env->DeleteLocalRef(ref_class);
+
   state.platform_view->RegisterTexture(
       std::make_shared<flutter::RustflutterSurfaceTexture>(
           id, global, std::static_pointer_cast<impeller::ContextGLES>(context)));
