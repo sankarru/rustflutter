@@ -56,6 +56,20 @@ public final class VideoBridge {
 
   private static final java.util.Map<Long, Handle> HANDLES = new java.util.HashMap<>();
 
+  static {
+    nativeCacheClass();
+  }
+
+  /**
+   * Hands this class to the engine, so native code never has to FindClass it.
+   *
+   * <p>A native thread that calls FindClass has no context classloader, so ART falls back to the
+   * system loader, which cannot see application classes: that is a ClassNotFoundException even
+   * though the class is right here in the APK. This runs on a Java thread at class-init, where
+   * FindClass would have worked, and the engine keeps the global reference.
+   */
+  private static native void nativeCacheClass();
+
   private static native long nativeCreateTexture(WeakReference<SurfaceTexture> surfaceTexture);
 
   private static native void nativeMarkFrameAvailable(long id);

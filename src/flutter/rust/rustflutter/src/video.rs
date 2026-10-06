@@ -15,10 +15,29 @@
 
 use std::sync::OnceLock;
 
-use jni::objects::JValue;
-use jni::sys::{jint, jlong, JNIEnv};
+use jni::objects::{JClass, JObject, JValue};
+use jni::sys::{jint, jlong, jobject};
 
-const BRIDGE: &str = "io/flutter/rustflutter/VideoBridge";
+unsafe extern "C" {
+    /// The `VideoBridge` class, as a JNI global reference, cached by the host.
+    fn rf_host_video_bridge_class() -> jobject;
+}
+
+/// `VideoBridge` without ever naming it to `FindClass`.
+///
+/// A native thread calling `FindClass` has no context classloader, so ART falls
+/// back to the system loader and reports `ClassNotFoundException` for a class
+/// that is in the APK. `VideoBridge` hands its class to the engine from a Java
+/// thread at class-init instead, and this picks that reference up.
+fn bridge_class() -> Result<JClass<'static>, jni::errors::Error> {
+    let raw = unsafe { rf_host_video_bridge_class() };
+    if raw.is_null() {
+        return Err(jni::errors::Error::NullPtr(
+            "VideoBridge was never cached by the host",
+        ));
+    }
+    Ok(unsafe { JObject::from_raw(raw) }.into())
+}
 
 /// A video player and the compositor texture it renders into.
 pub struct VideoPlayer {
@@ -33,7 +52,7 @@ impl VideoPlayer {
     /// into it and the compositor can draw it without a crop or a UV transform.
     pub fn create(width: i32, height: i32) -> Result<VideoPlayer, jni::errors::Error> {
         let mut env = attach()?;
-        let class = env.find_class(BRIDGE)?;
+        let class = bridge_class()?;
         let (w, h) = (jint::from(width), jint::from(height));
         let id = env
             .call_static_method(&class, "create", "(II)J", &[JValue::Int(w), JValue::Int(h)])?
@@ -56,7 +75,7 @@ impl VideoPlayer {
     /// by `MediaPlayer`; this call only hands over the data source and surface.
     pub fn set_source(&mut self, url: &str) -> Result<(), jni::errors::Error> {
         let mut env = attach()?;
-        let class = env.find_class(BRIDGE)?;
+        let class = bridge_class()?;
         let jurl = env.new_string(url)?;
         env.call_static_method(
             &class,
@@ -69,7 +88,7 @@ impl VideoPlayer {
 
     pub fn play(&self) -> Result<(), jni::errors::Error> {
         let mut env = attach()?;
-        let class = env.find_class(BRIDGE)?;
+        let class = bridge_class()?;
         env.call_static_method(
             &class,
             "play",
@@ -81,7 +100,7 @@ impl VideoPlayer {
 
     pub fn pause(&self) -> Result<(), jni::errors::Error> {
         let mut env = attach()?;
-        let class = env.find_class(BRIDGE)?;
+        let class = bridge_class()?;
         env.call_static_method(
             &class,
             "pause",
@@ -99,7 +118,7 @@ impl Drop for VideoPlayer {
         }
         self.released = true;
         if let Ok(mut env) = attach() {
-            if let Ok(class) = env.find_class(BRIDGE) {
+            if let Ok(class) = bridge_class() {
                 let _ = env.call_static_method(
                     &class,
                     "release",

@@ -923,6 +923,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "video_scroller"
+version = "0.1.0"
+dependencies = [
+ "mobile-sentinel",
+ "rustflutter",
+ "ureq",
+]
+
+[[package]]
 name = "walkdir"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
