@@ -1735,12 +1735,14 @@ class HostPlatformView final : public PlatformView,
 /// registry -- is the engine's own machinery.
 class RustflutterSurfaceTexture final : public flutter::Texture {
  public:
+  // Taken by const reference and copied, the way
+  // SurfaceTextureExternalTexture takes it: ScopedJavaGlobalRef has no move
+  // constructor, and moving one into the member does not compile.
   RustflutterSurfaceTexture(
       int64_t id,
-      fml::jni::ScopedJavaGlobalRef<jobject> surface_texture,
+      const fml::jni::ScopedJavaGlobalRef<jobject>& surface_texture,
       std::shared_ptr<impeller::ContextGLES> context)
-      : flutter::Texture(id),
-        surface_texture_(std::move(surface_texture)),
+      : flutter::Texture(id), surface_texture_(surface_texture),
         context_(std::move(context)) {}
 
   ~RustflutterSurfaceTexture() override = default;
@@ -2152,8 +2154,7 @@ Java_io_flutter_rustflutter_VideoBridge_nativeCreateTexture(JNIEnv* env,
   auto id = g_next_video_texture_id.fetch_add(1);
   auto global = fml::jni::ScopedJavaGlobalRef<jobject>(env, surface_texture);
   state.platform_view->RegisterTexture(std::make_shared<flutter::RustflutterSurfaceTexture>(
-      id, std::move(global),
-      std::static_pointer_cast<impeller::ContextGLES>(context)));
+      id, global, std::static_pointer_cast<impeller::ContextGLES>(context)));
   return static_cast<jlong>(id);
 }
 
