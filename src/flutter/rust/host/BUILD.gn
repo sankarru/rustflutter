@@ -156,7 +156,6 @@ source_set("host") {
       "//flutter/impeller",
       "//flutter/impeller/renderer/backend/gles",
       "//flutter/impeller/renderer/backend/vulkan",
-      "//flutter/impeller/display_list:dl_image_impeller",
       "//flutter/impeller/toolkit/egl",
       "//flutter/shell/gpu:gpu_surface_gl",
       "//flutter/shell/gpu:gpu_surface_vulkan",
@@ -203,13 +202,8 @@ source_set("host") {
       "//flutter/impeller/toolkit/egl",
       "//flutter/shell/gpu:gpu_surface_gl",
 
-      # SurfaceTextureExternalTextureGLImpeller and PlatformViewAndroidJNIImpl,
-      # used to register a video surface with the compositor exactly as
-      # PlatformViewAndroid::RegisterSurfaceTexture does upstream. The
-      # source_set, not //flutter/shell/platform/android: the group pulls in
-      # gen_snapshot.gni, which needs the Dart snapshot toolchain this build
-      # deliberately does not have (--no-prebuilt-dart-sdk).
-      "//flutter/shell/platform/android:flutter_shell_native_src",
+      # The Impeller DlImage the SurfaceTexture textures composite through.
+      "//flutter/impeller/display_list",
     ]
 
     libs = [
