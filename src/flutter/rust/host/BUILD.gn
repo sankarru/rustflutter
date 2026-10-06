@@ -80,7 +80,24 @@ source_set("host") {
       "rustflutter_key_map_win.h",
     ]
   } else if (is_android) {
-    sources += [ "rustflutter_host_android.cc" ]
+    sources += [
+      "rustflutter_host_android.cc",
+
+      # Upstream's SurfaceTexture external-texture implementation, used
+      # verbatim for video frames rather than reimplemented. Listed by path
+      # instead of depended on as
+      # //flutter/shell/platform/android:flutter_shell_native_src: that
+      # BUILD.gn cannot be loaded by this fork at all (it imports
+      # lib/snapshot, which has no Dart VM here), and GN loads a file whole, so
+      # a dep on it fails `gn gen` before a single source is compiled.
+      # platform_view_android_jni_impl.cc is deliberately NOT here: it includes
+      # android_shell_holder.h and flutter_main.h, which drag in the embedding
+      # (and with it the Dart snapshot tree this fork does not have). The JNI
+      # facade it would provide is the five SurfaceTexture methods, which the
+      # host implements directly -- see RustflutterSurfaceTextureJNI.
+      "../shell/platform/android/surface_texture_external_texture.cc",
+      "../shell/platform/android/surface_texture_external_texture_gl_impeller.cc",
+    ]
   } else if (is_mac) {
     sources += [
       "rustflutter_host_mac.mm",
@@ -139,6 +156,7 @@ source_set("host") {
       "//flutter/impeller",
       "//flutter/impeller/renderer/backend/gles",
       "//flutter/impeller/renderer/backend/vulkan",
+      "//flutter/impeller/display_list:dl_image_impeller",
       "//flutter/impeller/toolkit/egl",
       "//flutter/shell/gpu:gpu_surface_gl",
       "//flutter/shell/gpu:gpu_surface_vulkan",
