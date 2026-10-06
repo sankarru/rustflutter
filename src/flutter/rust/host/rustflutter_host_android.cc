@@ -1890,8 +1890,7 @@ class RustflutterSurfaceTexture final : public flutter::Texture {
     }
 
     FML_LOG(INFO) << "rustflutter: video texture " << Id() << " attached to GL "
-                  << handle.value() << " on thread "
-                  << fml::GetCurrentThreadName();
+                  << handle.value() << " on thread " << VideoThreadName();
     texture_ = std::move(texture);
     return true;
   }
