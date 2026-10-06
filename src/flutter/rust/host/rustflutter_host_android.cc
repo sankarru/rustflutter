@@ -1786,7 +1786,8 @@ class RustflutterSurfaceTexture final : public flutter::Texture {
 
     auto image = impeller::DlImageImpeller::Make(texture_);
     context.canvas->DrawImage(image,
-                              ToDlPoint(bounds.origin()),
+                              DlPoint{static_cast<float>(bounds.left),
+                                      static_cast<float>(bounds.top)},
                               sampling,
                               context.paint);
   }
