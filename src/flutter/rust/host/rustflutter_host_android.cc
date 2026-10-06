@@ -2111,6 +2111,15 @@ int32_t rf_host_run(const RfHostOptions* options) {
 // which is why every application in this fork shares that one class and varies
 // only its application id.
 
+namespace {
+// VideoBridge, as a JNI global reference, seeded in JNI_OnLoad.
+//
+// Rust drives this bridge, and Rust runs on native threads where FindClass has
+// no context classloader: ART falls back to the system loader and reports
+// ClassNotFoundException for a class that is demonstrably in the APK.
+std::atomic<jclass> g_video_bridge_class{nullptr};
+}  // namespace
+
 extern "C" {
 
 JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved) {
@@ -2121,6 +2130,25 @@ JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved) {
   FML_CHECK(activity != nullptr) << "RustflutterActivity was not found.";
   flutter::JavaBridge::Initialise(env, activity);
   env->DeleteLocalRef(activity);
+
+  // VideoBridge, cached here because JNI_OnLoad is the one point in this fork
+  // that can name an application class: it runs on the thread that called
+  // loadLibrary, so it still has the application classloader, which is exactly
+  // what a later native thread does not have. Rust cannot load the class to ask
+  // for it, so it has to be seeded here or not at all -- and seeding it from
+  // VideoBridge's own static initializer does not work either, because nothing
+  // touches that class until Rust can already call into it.
+  jclass bridge = env->FindClass("io/flutter/rustflutter/VideoBridge");
+  if (bridge != nullptr) {
+    g_video_bridge_class.store(static_cast<jclass>(env->NewGlobalRef(bridge)),
+                               std::memory_order_release);
+    env->DeleteLocalRef(bridge);
+  } else {
+    // Not fatal: an APK built without the video host has no VideoBridge, and
+    // only a video call would care. Clearing here keeps the exception from
+    // surfacing later as something unrelated.
+    env->ExceptionClear();
+  }
   return JNI_VERSION_1_6;
 }
 
@@ -2147,20 +2175,7 @@ Java_io_flutter_rustflutter_RustflutterActivity_nativeSurfaceCreated(
 namespace {
 std::atomic<int64_t> g_next_video_texture_id{1};
 
-// VideoBridge, as a global reference handed over by Java at class-init.
-//
-// Rust drives this bridge, and Rust runs on native threads where FindClass has
-// no context classloader: ART falls back to the system loader and reports
-// ClassNotFoundException for a class that is demonstrably in the APK. So Java
-// hands the class to us instead, once, from a thread that can see it.
-std::atomic<jclass> g_video_bridge_class{nullptr};
 }  // namespace
-
-JNIEXPORT void JNICALL
-Java_io_flutter_rustflutter_VideoBridge_nativeCacheClass(JNIEnv* env, jclass clazz) {
-  g_video_bridge_class.store(static_cast<jclass>(env->NewGlobalRef(clazz)),
-                             std::memory_order_release);
-}
 
 // The cached VideoBridge class for rustflutter::video. This is a JNI global
 // reference held by g_video_bridge_class: valid for the life of the process,
