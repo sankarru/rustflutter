@@ -61,6 +61,9 @@ jobs:
       # like it came from a different compiler and nothing ever hits.
       CCACHE_COMPILERCHECK: "content"
       CCACHE_MAXSIZE: "5G"
+      # Compressed caches upload several times faster, which matters now that
+      # every run re-uploads its cache (see the key comment below).
+      CCACHE_COMPRESS: "1"
       # Empty on a push, where workflow_dispatch inputs do not exist.
       SLIMPELLER: ${{ inputs.slimpeller || 'false' }}
 
@@ -88,13 +91,34 @@ jobs:
           sudo apt-get install -y ccache
           ccache --version | head -1
           ccache --set-config=max_size="$CCACHE_MAXSIZE"
+          ccache --set-config=compression=true
+          # Counters start at zero so the stats printed after the build describe
+          # this run, not the history carried in the restored cache.
+          ccache --zero-stats
 
+      # A rolling key, NOT one keyed on DEPS alone.
+      #
+      # actions/cache does not save when the primary key already exists: an
+      # exact-key hit means "restore and stop", so a stable key is written once
+      # and then frozen forever. That is what happened here -- every cache in this
+      # repo is the same 122 MiB from 2026-10-03 with only its `last used` date
+      # moving, so every object compiled since (including all of the video
+      # texture work) was never persisted, and each run paid a near-cold compile
+      # while looking like it had hit.
+      #
+      # The run id makes every run a new key, so the run saves whatever it built
+      # and restore-keys walks back through the most recent cache for the same
+      # DEPS, then any Linux cache. Cost: the whole cache is re-uploaded each
+      # run, which is what buys correctness here; CCACHE_COMPRESS keeps that
+      # affordable.
       - name: Restore ccache
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/.ccache
-          key: ccache-${{ runner.os }}-${{ hashFiles('DEPS', '.github/workflows/android-shared-engine.yml') }}
+          key: ccache-${{ runner.os }}-${{ hashFiles('DEPS') }}-${{ github.run_id }}
           restore-keys: |
+            ccache-${{ runner.os }}-${{ hashFiles('DEPS') }}-
+            ccache-${{ runner.os }}-${{ hashFiles('DEPS', '.github/workflows/android-shared-engine.yml') }}-
             ccache-${{ runner.os }}-
 
       - name: Set up depot_tools
