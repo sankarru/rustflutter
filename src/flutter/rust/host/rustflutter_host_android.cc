@@ -1764,21 +1764,31 @@ class RustflutterSurfaceTexture final : public flutter::Texture {
              const DlRect& bounds,
              bool freeze,
              const DlImageSampling sampling) override {
+    // The GL texture is created and attached on first paint, NOT in
+    // OnGrContextCreated. That hook is only ever called from Rasterizer::Setup,
+    // which runs once when the surface exists -- long before a video texture is
+    // registered -- and TextureRegistry::RegisterTexture does not call it for
+    // late arrivals. Upstream's SurfaceTextureExternalTexture initializes the
+    // same way, from ProcessFrame, for exactly this reason. Doing it in
+    // OnGrContextCreated looks right and silently never draws anything: the
+    // player decodes, the screen stays static, and no code complains.
     if (!texture_) {
+      if (!Attach()) {
+        return;
+      }
+    }
+
+    // Latch the newest producer frame. A video frame is exactly that: an
+    // external producer writing into a Surface, no bytes crossing here.
+    if (!Update()) {
       return;
     }
-    // updateTexImage latches the newest producer frame. A video frame is exactly
-    // that: an external producer writing into a Surface, no bytes crossing here.
-    JNIEnv* env = fml::jni::AttachCurrentThread();
-    jclass cls = env->GetObjectClass(surface_texture_.obj());
-    jmethodID update = env->GetMethodID(cls, "updateTexImage", "()V");
-    env->CallVoidMethod(surface_texture_.obj(), update);
-    if (env->ExceptionCheck()) {
-      env->ExceptionClear();
-      return;
-    }
-    sk_sp<flutter::DlImage> image = impeller::DlImageImpeller::Make(texture_);
-    context.canvas->DrawImage(image, DlPoint{0.0, 0.0}, sampling, context.paint);
+
+    auto image = impeller::DlImageImpeller::Make(texture_);
+    context.canvas->DrawImage(image,
+                              ToDlPoint(bounds.origin()),
+                              sampling,
+                              context.paint);
   }
 
   /// The frame is already in the SurfaceTexture; the compositor asks for the
@@ -1787,37 +1797,99 @@ class RustflutterSurfaceTexture final : public flutter::Texture {
 
   void OnTextureUnregistered() override { OnGrContextDestroyed(); }
 
-  void OnGrContextCreated() override {
-    if (texture_) {
+  /// Nothing here on purpose -- see Paint. The context already exists by the
+  /// time a video texture is registered, and Paint is what needs the handle.
+  void OnGrContextCreated() override {}
+
+  void OnGrContextDestroyed() override {
+    if (!texture_) {
       return;
     }
+    if (auto handle = texture_->GetGLHandle(); handle.has_value()) {
+      JNIEnv* env = fml::jni::AttachCurrentThread();
+      if (jclass cls = env->GetObjectClass(surface_texture_.obj())) {
+        jmethodID detach = env->GetMethodID(cls, "detachFromGLContext", "()V");
+        env->CallVoidMethod(surface_texture_.obj(), detach);
+        env->DeleteLocalRef(cls);
+      }
+      env->ExceptionClear();
+    }
+    texture_.reset();
+  }
+
+ private:
+  /// Creates the external-OES texture and hands its name to the SurfaceTexture
+  /// as its GL context. Returns false if either step failed.
+  bool Attach() {
     impeller::TextureDescriptor desc;
     desc.type = impeller::TextureType::kTextureExternalOES;
     desc.storage_mode = impeller::StorageMode::kDevicePrivate;
     desc.format = impeller::PixelFormat::kR8G8B8A8UNormInt;
+    // External OES sampling ignores texel size; the producer's own buffer is
+    // what has dimensions.
     desc.size = {1, 1};
     desc.mip_count = 1;
-    texture_ =
+    auto texture =
         std::make_shared<impeller::TextureGLES>(context_->GetReactor(), desc);
-    texture_->MarkContentsInitialized();
-    auto handle = texture_->GetGLHandle();
+    // The contents arrive from the producer, not from Impeller.
+    texture->MarkContentsInitialized();
+
+    auto handle = texture->GetGLHandle();
     if (!handle.has_value()) {
-      FML_LOG(ERROR) << "rustflutter: no GL handle for the video texture";
-      texture_.reset();
-      return;
+      FML_LOG(ERROR) << "rustflutter: the video texture got no GL handle";
+      return false;
     }
+
     JNIEnv* env = fml::jni::AttachCurrentThread();
     jclass cls = env->GetObjectClass(surface_texture_.obj());
+    if (cls == nullptr) {
+      FML_LOG(ERROR) << "rustflutter: no class for the video SurfaceTexture";
+      return false;
+    }
     jmethodID attach = env->GetMethodID(cls, "attachToGLContext", "(I)V");
     env->CallVoidMethod(surface_texture_.obj(), attach, handle.value());
-    if (env->ExceptionCheck()) {
+    const bool threw = env->ExceptionCheck();
+    if (threw) {
+      env->ExceptionDescribe();
       env->ExceptionClear();
     }
+    env->DeleteLocalRef(cls);
+    if (threw) {
+      FML_LOG(ERROR) << "rustflutter: attachToGLContext failed for the video "
+                        "texture";
+      return false;
+    }
+
+    FML_LOG(INFO) << "rustflutter: video texture " << Id() << " attached to GL "
+                  << handle.value();
+    texture_ = std::move(texture);
+    return true;
   }
 
-  void OnGrContextDestroyed() override { texture_.reset(); }
+  /// updateTexImage on the SurfaceTexture. False if the frame could not be
+  /// latched, in which case there is nothing new to draw.
+  bool Update() {
+    JNIEnv* env = fml::jni::AttachCurrentThread();
+    jclass cls = env->GetObjectClass(surface_texture_.obj());
+    if (cls == nullptr) {
+      return false;
+    }
+    jmethodID update = env->GetMethodID(cls, "updateTexImage", "()V");
+    env->CallVoidMethod(surface_texture_.obj(), update);
+    const bool threw = env->ExceptionCheck();
+    if (threw) {
+      env->ExceptionDescribe();
+      env->ExceptionClear();
+    }
+    env->DeleteLocalRef(cls);
+    if (threw) {
+      FML_LOG(ERROR) << "rustflutter: updateTexImage failed for video texture "
+                     << Id();
+      return false;
+    }
+    return true;
+  }
 
- private:
   fml::jni::ScopedJavaGlobalRef<jobject> surface_texture_;
   std::shared_ptr<impeller::ContextGLES> context_;
   std::shared_ptr<impeller::TextureGLES> texture_;
