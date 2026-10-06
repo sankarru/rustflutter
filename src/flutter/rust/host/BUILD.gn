@@ -187,8 +187,11 @@ source_set("host") {
 
       # SurfaceTextureExternalTextureGLImpeller and PlatformViewAndroidJNIImpl,
       # used to register a video surface with the compositor exactly as
-      # PlatformViewAndroid::RegisterSurfaceTexture does upstream.
-      "//flutter/shell/platform/android",
+      # PlatformViewAndroid::RegisterSurfaceTexture does upstream. The
+      # source_set, not //flutter/shell/platform/android: the group pulls in
+      # gen_snapshot.gni, which needs the Dart snapshot toolchain this build
+      # deliberately does not have (--no-prebuilt-dart-sdk).
+      "//flutter/shell/platform/android:flutter_shell_native_src",
     ]
 
     libs = [
