@@ -1789,6 +1789,16 @@ class RustflutterSurfaceTexture final : public flutter::Texture {
       // attach failure that actually explains it.
       return;
     }
+    {
+      // A screen that never changes could mean frames are not arriving, or that
+      // they arrive and nothing repaints. These two counters say which.
+      static std::atomic<int> paints{0};
+      const int n = ++paints;
+      if (n <= 3 || n % 120 == 0) {
+        FML_LOG(ERROR) << "rustflutter: paint with a live texture (call " << n
+                       << ", texture " << Id() << ")";
+      }
+    }
 
     // Latch the newest producer frame. A video frame is exactly that: an
     // external producer writing into a Surface, no bytes crossing here.
@@ -1797,12 +1807,18 @@ class RustflutterSurfaceTexture final : public flutter::Texture {
     }
 
     auto image = impeller::DlImageImpeller::Make(texture_);
-    // Drawn at the origin, as upstream does for an identity transform. This
-    // host reads no UV matrix on purpose: VideoBridge sets the SurfaceTexture's
-    // default buffer size to the card size, so the producer scales into it and
-    // the transform is the identity -- the same case upstream short-circuits to
-    // a plain DrawImage at 0, 0.
-    context.canvas->DrawImage(image, DlPoint{0, 0}, sampling, context.paint);
+    if (!image) {
+      return;
+    }
+    // Stretched over the card, never drawn at its natural size. The
+    // external-OES descriptor is 1x1 -- Impeller has no way to learn the
+    // producer's dimensions -- so a plain DrawImage paints one pixel at the
+    // origin and the screen looks untouched while the decoder runs happily
+    // underneath. Sampling an OES texture reads UV 0..1 no matter what the
+    // descriptor claims, so a rect over `bounds` shows the whole frame. This is
+    // the same geometry upstream's non-identity branch reaches, which is the
+    // branch every real SurfaceTexture takes.
+    context.canvas->DrawImageRect(image, bounds, sampling, context.paint);
   }
 
   /// The frame is already in the SurfaceTexture; the compositor asks for the
@@ -2365,7 +2381,15 @@ Java_io_flutter_rustflutter_VideoBridge_nativeMarkFrameAvailable(JNIEnv* env,
                                                                    jclass clazz,
                                                                    jlong id) {
   auto& state = flutter::HostState::Get();
+  static std::atomic<int> marks{0};
+  const int n = ++marks;
+  if (n <= 3 || n % 120 == 0) {
+    FML_LOG(ERROR) << "rustflutter: producer frame available for texture " << id
+                   << " (call " << n << ")";
+  }
   if (state.platform_view == nullptr) {
+    FML_LOG(ERROR) << "rustflutter: no platform view for a frame on texture "
+                   << id;
     return;
   }
   state.platform_view->MarkTextureFrameAvailable(static_cast<int64_t>(id));

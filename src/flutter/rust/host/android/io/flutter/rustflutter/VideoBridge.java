@@ -6,6 +6,7 @@ package io.flutter.rustflutter;
 
 import android.graphics.SurfaceTexture;
 import android.media.MediaPlayer;
+import android.util.Log;
 import android.view.Surface;
 import java.io.IOException;
 import java.lang.ref.WeakReference;
@@ -25,6 +26,8 @@ import java.lang.ref.WeakReference;
  * dependency to resolve and no second codec stack to configure.
  */
 public final class VideoBridge {
+  private static final String TAG = "VideoBridge";
+
   private VideoBridge() {}
 
   /** One playing (or paused) player and the surface it writes frames into. */
@@ -96,13 +99,27 @@ public final class VideoBridge {
     if (handle == null) {
       return;
     }
+    Log.i(TAG, "setSource " + url);
     handle.player.reset();
     handle.player.setDataSource(url);
     handle.player.setSurface(handle.surface);
+    // A refused source shows up as prepare() failing with MEDIA_ERROR_IO and
+    // nothing else: no frames, no decoder, and a feed that looks like it is
+    // loading forever. Without this the cause of a blank card is invisible --
+    // the video source, not the texture path.
+    handle.player.setOnErrorListener(
+        new MediaPlayer.OnErrorListener() {
+          @Override
+          public boolean onError(MediaPlayer player, int what, int extra) {
+            Log.e(TAG, "media error what=" + what + " extra=" + extra + " url=" + url);
+            return true;
+          }
+        });
     handle.player.setOnPreparedListener(
         new MediaPlayer.OnPreparedListener() {
           @Override
           public void onPrepared(MediaPlayer player) {
+            Log.i(TAG, "prepared and starting " + url);
             // setSource is asynchronous (prepareAsync), so starting here is the
             // only point at which the player is in a state that accepts it.
             player.start();
