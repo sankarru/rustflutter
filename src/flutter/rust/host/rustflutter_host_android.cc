@@ -2153,30 +2153,26 @@ std::atomic<int64_t> g_next_video_texture_id{1};
 // no context classloader: ART falls back to the system loader and reports
 // ClassNotFoundException for a class that is demonstrably in the APK. So Java
 // hands the class to us instead, once, from a thread that can see it.
-fml::jni::ScopedJavaGlobalRef<jclass> g_video_bridge_class;
-
-fml::jni::ScopedJavaGlobalRef<jclass> VideoBridgeClass() {
-  if (g_video_bridge_class.is_null()) {
-    FML_LOG(ERROR) << "rustflutter: VideoBridge was never cached; nativeCacheClass "
-                      "did not run";
-  }
-  return g_video_bridge_class;
-}
+std::atomic<jclass> g_video_bridge_class{nullptr};
 }  // namespace
 
 JNIEXPORT void JNICALL
 Java_io_flutter_rustflutter_VideoBridge_nativeCacheClass(JNIEnv* env, jclass clazz) {
-  g_video_bridge_class = fml::jni::ScopedJavaGlobalRef<jclass>(env, clazz);
+  g_video_bridge_class.store(static_cast<jclass>(env->NewGlobalRef(clazz)),
+                             std::memory_order_release);
 }
 
 // The cached VideoBridge class for rustflutter::video. This is a JNI global
 // reference held by g_video_bridge_class: valid for the life of the process,
 // and the caller must not delete it.
 JNIEXPORT jobject rf_host_video_bridge_class() {
-  if (g_video_bridge_class.is_null()) {
+  jclass cached = g_video_bridge_class.load(std::memory_order_acquire);
+  if (cached == nullptr) {
+    FML_LOG(ERROR) << "rustflutter: VideoBridge was never cached; nativeCacheClass "
+                      "did not run";
     return nullptr;
   }
-  return g_video_bridge_class.obj();
+  return cached;
 }
 
 JNIEXPORT jlong JNICALL
