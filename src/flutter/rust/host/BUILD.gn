@@ -184,6 +184,11 @@ source_set("host") {
       "//flutter/impeller/renderer/backend/gles",
       "//flutter/impeller/toolkit/egl",
       "//flutter/shell/gpu:gpu_surface_gl",
+
+      # SurfaceTextureExternalTextureGLImpeller and PlatformViewAndroidJNIImpl,
+      # used to register a video surface with the compositor exactly as
+      # PlatformViewAndroid::RegisterSurfaceTexture does upstream.
+      "//flutter/shell/platform/android",
     ]
 
     libs = [

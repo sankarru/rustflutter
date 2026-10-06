@@ -8,6 +8,7 @@ import android.graphics.SurfaceTexture;
 import android.media.MediaPlayer;
 import android.view.Surface;
 import java.io.IOException;
+import java.lang.ref.WeakReference;
 
 /**
  * Video playback for the rustflutter host.
@@ -41,9 +42,21 @@ public final class VideoBridge {
     }
   }
 
+  /**
+   * The weak reference the engine's JNI facade expects.
+   *
+   * <p>This is the same object FlutterRenderer passes to
+   * PlatformViewAndroidJNIImpl: a WeakReference whose referent is the
+   * SurfaceTexture, not the SurfaceTexture itself. Handle holds the strong
+   * reference, so the referent cannot be collected while the player runs.
+   */
+  private static WeakReference<SurfaceTexture> weak(SurfaceTexture texture) {
+    return new WeakReference<>(texture);
+  }
+
   private static final java.util.Map<Long, Handle> HANDLES = new java.util.HashMap<>();
 
-  private static native long nativeCreateTexture(SurfaceTexture surfaceTexture);
+  private static native long nativeCreateTexture(WeakReference<SurfaceTexture> surfaceTexture);
 
   private static native void nativeMarkFrameAvailable(long id);
 
@@ -59,7 +72,7 @@ public final class VideoBridge {
   public static synchronized long create(int width, int height) {
     SurfaceTexture surfaceTexture = new SurfaceTexture(/* textureName= */ 0);
     surfaceTexture.setDefaultBufferSize(width, height);
-    long id = nativeCreateTexture(surfaceTexture);
+    long id = nativeCreateTexture(weak(surfaceTexture));
     if (id < 0) {
       surfaceTexture.release();
       return id;
@@ -85,6 +98,15 @@ public final class VideoBridge {
     handle.player.reset();
     handle.player.setDataSource(url);
     handle.player.setSurface(handle.surface);
+    handle.player.setOnPreparedListener(
+        new MediaPlayer.OnPreparedListener() {
+          @Override
+          public void onPrepared(MediaPlayer player) {
+            // setSource is asynchronous (prepareAsync), so starting here is the
+            // only point at which the player is in a state that accepts it.
+            player.start();
+          }
+        });
     handle.player.prepareAsync();
   }
 
