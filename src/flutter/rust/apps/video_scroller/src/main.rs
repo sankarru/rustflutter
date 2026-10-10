@@ -111,16 +111,19 @@ const PERMISSION_WATCH: Duration = Duration::from_secs(30);
 /// page has something to show while the player prepares; the mp4 is what the
 /// platform MediaPlayer renders into the compositor's external texture.
 ///
-/// Google's public sample bucket: the same URLs ExoPlayer's own tests use, and
-/// they need no key or account.
+/// Hosts that answer a range request for a real `video/mp4` from this network.
+/// Google's public sample bucket now returns 403 for every object in it, which
+/// the player reports as `MEDIA_ERROR_IO` during prepare -- no decoder, no
+/// frames, and nothing in the pipeline that says the *source* was refused. Each
+/// URL here was checked with a ranged GET before it was put in this table.
 const VIDEOS: &[(&str, &str, &str)] = &[
-    ("1015", "a river running through the mountains", "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4"),
-    ("1016", "a canoe on a lake, and a person in it", "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4"),
-    ("1018", "a mountain range under cloud", "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4"),
-    ("1024", "a bear, which is the sort of thing that happens", "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4"),
-    ("1025", "a pug in a blanket", "https://storage.googleapis.com/gtv-videos-bucket/sample/SubaruOutbackOnStreetAndDirt.mp4"),
-    ("1036", "a bay, from above", "https://storage.googleapis.com/gtv-videos-bucket/sample/WeAreGoingOnBullrun.mp4"),
-    ("1043", "the last frames of a film camera", "https://storage.googleapis.com/gtv-videos-bucket/sample/WhatCarCanYouGetForAGrand.mp4"),
+    ("1015", "a lone traveler in a frozen land", "https://media.w3.org/2010/05/sintel/trailer.mp4"),
+    ("1016", "a round rabbit waking in a meadow", "https://media.w3.org/2010/05/bunny/trailer.mp4"),
+    ("1018", "jellyfish drifting through dark water", "https://test-videos.co.uk/vids/jellyfish/mp4/h264/720/Jellyfish_720_10s_1MB.mp4"),
+    ("1024", "a giant rabbit in the tall grass", "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4"),
+    ("1025", "a purple flower swaying in the breeze", "https://mdn.github.io/shared-assets/videos/flower.mp4"),
+    ("1036", "a figure crossing wind-blown snow", "https://test-videos.co.uk/vids/sintel/mp4/h264/720/Sintel_720_10s_1MB.mp4"),
+    ("1043", "a jellyfish pulsing in deep blue water", "https://test-videos.co.uk/vids/jellyfish/mp4/h264/360/Jellyfish_360_10s_1MB.mp4"),
 ];
 
 fn url_for(id: &str) -> String {
@@ -210,7 +213,16 @@ struct Io {
     /// Only so a fling can notice a long gap between frames and not jump.
     last: Option<Instant>,
     /// Which video page is current: the one nearest the top of the viewport.
+    /// This follows the finger, so it moves long before the list stops.
     active: usize,
+    /// Which page the player has actually been handed. Separate from `active`
+    /// because changing a source costs a `player.reset()` + `prepareAsync()` of
+    /// ~1.4s: handing the player a new page on every scroll frame meant the feed
+    /// spent its whole life restarting and showed no video while moving.
+    playing: Option<usize>,
+    /// A finger is down and moving, so the list is not at rest even though the
+    /// fling velocity has been zeroed by the drag handler.
+    dragging: bool,
     /// The source the player was last handed, so a build does not re-prepare it.
     video_source: Option<String>,
     /// Why the player is not showing frames, when that is known.
@@ -234,6 +246,8 @@ impl Io {
             viewport: 800.0,
             last: None,
             active: 0,
+            playing: None,
+            dragging: false,
             video_source: None,
             video_error: None,
             watch_permission_until: None,
@@ -386,7 +400,9 @@ impl StatefulComponent for Page {
         // open N codecs at once, which is the thing a feed must not do.
         let page_height = CARD_HEIGHT + CARD_SPACING;
         let active = ((io.offset / page_height).round() as usize).min(VIDEOS.len() - 1);
-        let active_changed = active != io.active || io.video_source.is_none();
+        // Only at rest. During a drag or a fling the card under the texture is
+        // moving anyway, and every switch throws away a prepared player.
+        let settled = !io.dragging && io.fling == 0.0;
         io.active = active;
         let source = VIDEOS[active].2.to_string();
         #[cfg(target_os = "android")]
@@ -399,12 +415,16 @@ impl StatefulComponent for Page {
                 }
             }
             if let Some(player) = slot.as_mut() {
-                if active_changed && io.video_source.as_deref() != Some(source.as_str()) {
-                    if let Err(e) = player.set_source(&source) {
-                        io.video_error = Some(format!("{e}"));
-                    } else {
-                        io.video_source = Some(source.clone());
-                        io.video_error = None;
+                if settled && io.playing != Some(active) {
+                    // Claimed before the switch: a failed prepare would otherwise
+                    // be retried on every single build for the rest of the session.
+                    io.playing = Some(active);
+                    match player.set_source(&source) {
+                        Ok(()) => {
+                            io.video_source = Some(source.clone());
+                            io.video_error = None;
+                        }
+                        Err(e) => io.video_error = Some(format!("{e}")),
                     }
                 }
                 Some(player.texture_id())
@@ -414,6 +434,12 @@ impl StatefulComponent for Page {
         };
         #[cfg(not(target_os = "android"))]
         let texture_id: Option<i64> = None;
+        // Which card carries the texture is decided by what the player was
+        // given, not by what the finger points at: the previous page keeps its
+        // video until this one has a source, and the incoming page shows its
+        // photo until then.
+        let playing = io.playing;
+        let video_error = io.video_error.clone();
         let cards: Vec<(&'static str, Option<Rc<Image>>)> = VIDEOS
             .iter()
             .map(|(id, caption, _)| (*caption, io.images.get(&url_for(id)).cloned()))
@@ -431,6 +457,7 @@ impl StatefulComponent for Page {
         let handlers = PointerHandlers::new()
             .with_drag_update(move |event| {
                 let mut io = on_drag.borrow_mut();
+                io.dragging = true;
                 // A finger moving up is a negative dy and must carry the list
                 // further up, which is the offset growing. Hence the negation,
                 // and it is why the release negates too.
@@ -444,6 +471,7 @@ impl StatefulComponent for Page {
                 // Negated for the same reason the drag is: a finger moving up is
                 // a negative dy and the offset grows.
                 io.fling = -event.velocity.dy.clamp(-MAX_VELOCITY, MAX_VELOCITY);
+                io.dragging = false;
                 release_handle.set_state(|()| ());
             });
 
@@ -467,6 +495,13 @@ impl StatefulComponent for Page {
         } else {
             "camera: not granted — tap to request"
         };
+        // The error was set and thrown away for the whole life of this feed.
+        // It replaces the camera line rather than joining it: a prepare that
+        // failed is what the user is waiting on, and one line is all there is.
+        let banner = match &video_error {
+            Some(error) => format!("video: {error}"),
+            None => state_line.to_string(),
+        };
 
         // The card is its own tap region, inside the scroll region: a tap does
         // not travel, so the drag handlers above never fire for it, and a drag
@@ -486,7 +521,7 @@ impl StatefulComponent for Page {
 
         let mut list = ListView::new().with_spacing(CARD_SPACING).with_offset(offset);
         for (index, (caption, image)) in cards.iter().enumerate() {
-            let texture = if index == active { texture_id } else { None };
+            let texture = if playing == Some(index) { texture_id } else { None };
             list = list.push(card(caption, image.as_ref(), texture));
         }
         // The permission banner sits above the scroll region, not in it: a
@@ -494,7 +529,7 @@ impl StatefulComponent for Page {
         // exactly what happened before it was pinned here.
         Column::new()
             .with_spacing(CARD_SPACING)
-            .push(Pointer::new(2, permission_card(state_line)).with_handlers(card_tap))
+            .push(Pointer::new(2, permission_card(&banner)).with_handlers(card_tap))
             .push_flex(Expanded::new(
                 Pointer::new(
                     1,
