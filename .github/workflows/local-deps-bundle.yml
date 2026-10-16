@@ -13,7 +13,7 @@ name: local-deps-bundle
 #
 # This builds nothing that ships. It is a distribution mechanism for inputs.
 #
-# ## Why an arm runner, and why a *host* build
+# ## Why an arm runner
 #
 # ccache keys an object on the compiler binary itself -- its content hash, plus
 # every flag and the preprocessed source. DEPS ships a separate clang per host
@@ -21,10 +21,13 @@ name: local-deps-bundle
 # ccache warmed on an x64 runner cannot produce a single hit on an arm64
 # machine. Hence `ubuntu-24.04-arm`.
 #
-# What it warms is a *host* linux-arm64 build rather than an Android one, for
-# two reasons.
+# ## Why an Android configuration
 #
-# The Android configuration needs an NDK at a hardcoded path:
+# It warms the same configuration a local build runs. A host build would key
+# the cache on a different set of flags and hand back one that misses on every
+# edge that matters.
+#
+# Which needs an NDK at a hardcoded path:
 #
 #   build/config/android/config.gni:59
 #     android_ndk_root = "//flutter/third_party/android_tools/sdk/ndk/28.2.13676358"
@@ -45,15 +48,11 @@ name: local-deps-bundle
 #
 # and Google's CDN serves NDKs under release names (r26b, r28c) and not under
 # the build numbers Flutter pins, so "just download 28.2.13676358" is not
-# available either. An Android build on an arm64 host therefore wants an NDK
-# that is already installed locally, which is what
-# `tools/local_android_ndk.sh` exists to accommodate.
-#
-# And it is the right thing to warm regardless: every line of engine C++ that
-# touches platform views -- flow/compositing_context.cc, the shell's
-# platform-view delegate, the rf_* FFI -- is platform-independent, so a host
-# build covers it. A host build also runs the engine's own gtest suite, which an
-# Android cross build never does.
+# available either. `tools/local_android_ndk.sh` bridges the two: it stands a
+# tree of symlinks at the path gn hardcodes, pointing at whichever NDK it is
+# given. This workflow gives it r28b, because
+# `android_ndk_clang_version = "19"` (config.gni:128) and r28b is the NDK whose
+# compiler runtime is clang 19.
 
 on:
   workflow_dispatch:
@@ -69,7 +68,7 @@ permissions:
 
 jobs:
   bundle:
-    name: DEPS tree + warm host ccache
+    name: DEPS tree + warm android ccache
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 480
     env:
@@ -124,14 +123,60 @@ jobs:
         run: update_depot_tools --no-registry
 
       # Unmodified. On an arm64 host `download_android_deps` is false, which
-      # means android_tools and the NDK are absent -- expected, and what
-      # tools/local_android_ndk.sh is for. Editing DEPS to widen the condition
-      # is not the fix; the packages it would ask for do not exist.
+      # means android_tools and the NDK are absent. Editing DEPS to widen the
+      # condition is not the fix; the packages it would ask for do not exist:
+      #
+      #   failed to resolve flutter/android/sdk/all/linux-arm64: no such package
+      #   failed to resolve perfetto/trace_to_text/linux-arm64: no such package
+      #
+      # The NDK comes from Google's CDN instead (next step).
       - name: gclient sync
         run: |
           cp tools/gclient.template .gclient
           gclient sync --no-history --nohooks
           gclient runhooks
+
+      # Chromium's arm64 host sysroot, which the build asserts on
+      # (build/config/sysroot.gni:35) and which neither DEPS nor gclient
+      # installs here:
+      #
+      #   ERROR at //build/config/sysroot.gni:35:5 (//build/toolchain/linux:clang_arm64)
+      #     Missing sysroot (../../build/linux/debian_bullseye_arm64-sysroot)
+      #
+      # It lives under `src/build`, which is the repository's own directory, so
+      # it is not part of the bundle either -- which is why a machine that only
+      # untars the deps has to run this too.
+      - name: Install the arm64 host sysroot
+        run: |
+          set -eux
+          python3 src/build/linux/sysroot_scripts/install-sysroot.py --arch=arm64
+          du -sh src/build/linux/debian_bullseye_arm64-sysroot
+
+      # The NDK, from Google's CDN. `build/config/android/config.gni:59` wants
+      # one at a build number that is not published there -- only release names
+      # are, and only 28.2.13676358 is a CIPD package gated to linux-x64 -- so
+      # r28b is taken and stood at the expected path by the shim.
+      #
+      # r28b is chosen because `android_ndk_clang_version = "19"` (config.gni:128)
+      # and r28b is the NDK whose compiler runtime is clang 19, so the alias
+      # local_android_ndk.sh would otherwise have to invent is not invented.
+      #
+      # One thing this cannot be assumed to be: gn asks for the NDK's
+      # `prebuilt/linux-x86_64` even on an arm64 host (config.gni:29), and
+      # whether that directory holds runnable aarch64 binaries at r28b is
+      # exactly the question this step asks. local_android_ndk.sh runs the
+      # clang it found and fails if it will not execute, rather than letting an
+      # unrunnable toolchain surface 5000 targets later.
+      - name: Fetch the NDK and shim it into place
+        run: |
+          set -eux
+          NDK_ZIP=android-ndk-r28b-linux.zip
+          curl -fSL -o "/tmp/${NDK_ZIP}" "https://dl.google.com/android/repository/${NDK_ZIP}"
+          mkdir -p /tmp/ndk
+          unzip -q "/tmp/${NDK_ZIP}" -d /tmp/ndk
+          rm -f "/tmp/${NDK_ZIP}"
+          ls /tmp/ndk
+          ./tools/local_android_ndk.sh /tmp/ndk/android-ndk-r28b
 
       # What landed, and how big. The compression ratio is not uniform: a
       # directory of jars or prebuilt clang will not shrink, one of sources
@@ -173,14 +218,17 @@ jobs:
           ls -la engine-deps.tar.zst
           df -h /
 
-      - name: gn gen (host)
+      # The Android configuration, because that is what a local build runs.
+      # Warming a host build instead would key the ccache on a different set of
+      # flags and hand back a cache that misses on every edge that matters.
+      - name: gn gen (android)
         run: |
           cd src
           vpython3 flutter/tools/gn \
-            --linux \
-            --linux-cpu arm64 \
+            --android \
+            --android-cpu arm64 \
             --runtime-mode=release \
-            --target-dir=linux_release_arm64 \
+            --target-dir=android_release_arm64 \
             --no-lto \
             --no-prebuilt-dart-sdk \
             --no-goma \
@@ -195,7 +243,7 @@ jobs:
       - name: ninja (warms ccache)
         continue-on-error: true
         run: |
-          ninja -C src/out/linux_release_arm64 flutter/rust:rustflutter_engine || true
+          ninja -C src/out/android_release_arm64 flutter/rust:rustflutter_engine || true
           ccache --show-stats || true
 
       - name: Pack ccache
