@@ -68,7 +68,7 @@ permissions:
 
 jobs:
   bundle:
-    name: DEPS tree + warm android ccache
+    name: DEPS tree + warm host ccache
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 480
     env:
@@ -152,31 +152,23 @@ jobs:
           python3 src/build/linux/sysroot_scripts/install-sysroot.py --arch=arm64
           du -sh src/build/linux/debian_bullseye_arm64-sysroot
 
-      # The NDK, from Google's CDN. `build/config/android/config.gni:59` wants
-      # one at a build number that is not published there -- only release names
-      # are, and only 28.2.13676358 is a CIPD package gated to linux-x64 -- so
-      # r28b is taken and stood at the expected path by the shim.
-      #
-      # r28b is chosen because `android_ndk_clang_version = "19"` (config.gni:128)
-      # and r28b is the NDK whose compiler runtime is clang 19, so the alias
-      # local_android_ndk.sh would otherwise have to invent is not invented.
-      #
-      # One thing this cannot be assumed to be: gn asks for the NDK's
-      # `prebuilt/linux-x86_64` even on an arm64 host (config.gni:29), and
-      # whether that directory holds runnable aarch64 binaries at r28b is
-      # exactly the question this step asks. local_android_ndk.sh runs the
-      # clang it found and fails if it will not execute, rather than letting an
-      # unrunnable toolchain surface 5000 targets later.
-      - name: Fetch the NDK and shim it into place
+      # Packed immediately after the sync, before anything that can fail. An earlier
+      # version packed it at the end, and an NDK step that failed took the whole
+      # bundle down with it -- which is the one outcome this job cannot have,
+      # because it is the only artifact here that cannot be produced another
+      # way. Everything after this point is best-effort.
+      - name: Pack the DEPS tree
+        if: always()
         run: |
           set -eux
-          NDK_ZIP=android-ndk-r28b-linux.zip
-          curl -fSL -o "/tmp/${NDK_ZIP}" "https://dl.google.com/android/repository/${NDK_ZIP}"
-          mkdir -p /tmp/ndk
-          unzip -q "/tmp/${NDK_ZIP}" -d /tmp/ndk
-          rm -f "/tmp/${NDK_ZIP}"
-          ls /tmp/ndk
-          ./tools/local_android_ndk.sh /tmp/ndk/android-ndk-r28b
+          time tar -I 'zstd -12 -T0 -q' -cf engine-deps.tar.zst \
+            --exclude='.git' \
+            src/third_party \
+            src/flutter/third_party \
+            src/flutter/buildtools \
+            .gclient
+          ls -la engine-deps.tar.zst
+          df -h /
 
       # What landed, and how big. The compression ratio is not uniform: a
       # directory of jars or prebuilt clang will not shrink, one of sources
@@ -196,39 +188,38 @@ jobs:
           ls -d src/flutter/third_party/android_tools 2>/dev/null \
             || echo "android_tools: absent (DEPS:27 gates it to mac/linux-x64)"
 
-      # The bundle. Exactly the roots DEPS populates -- the repository's own
-      # `src/flutter`, `src/build` and `src/BUILD.gn` are in the clone and must
-      # not be shadowed by whatever is in the tar.
+      # A host linux-arm64 configuration. Not the Android one, and the reason is
+      # worth recording because it cost a run to find out.
       #
-      # zstd -12 over xz: the download is the expensive half, and -12 costs a
-      # few hundred MB against -9e for minutes of runner time and a far wider
-      # compression window.
+      # The Android configuration needs an NDK, and gn reaches for
+      # `prebuilt/linux-x86_64` even on an arm64 host (config.gni:29 maps every
+      # host CPU to "x86_64"). Google builds NDKs whose tools in that directory
+      # are x86_64 binaries:
       #
-      # --exclude on .git: gclient writes one per checkout even with
-      # --no-history, and they are dead weight in a tarball nobody will sync.
-      - name: Pack the DEPS tree
-        run: |
-          set -eux
-          time tar -I 'zstd -12 -T0 -q' -cf engine-deps.tar.zst \
-            --exclude='.git' \
-            src/third_party \
-            src/flutter/third_party \
-            src/flutter/buildtools \
-            .gclient
-          ls -la engine-deps.tar.zst
-          df -h /
-
-      # The Android configuration, because that is what a local build runs.
-      # Warming a host build instead would key the ccache on a different set of
-      # flags and hand back a cache that misses on every edge that matters.
-      - name: gn gen (android)
+      #   $ ./tools/local_android_ndk.sh /tmp/ndk/android-ndk-r28b
+      #   prebuilt : .../prebuilt/linux-x86_64  (config.gni: android_host_arch=x86_64)
+      #   that clang will not run on this host
+      #
+      # So an arm64 runner cannot build the Android configuration with any NDK
+      # it can obtain, and the x64 Android build that can (`android-shared-engine`)
+      # keys its ccache on `buildtools/linux-x64/clang`, which shares nothing
+      # with this machine. There is no cache a CI runner can hand this box that
+      # would serve an Android build here.
+      #
+      # A host build needs no NDK, and it is the configuration whose C++ is the
+      # same C++ -- flow/compositing_context.cc, the shell's platform-view
+      # delegate, the rf_* FFI, none of which are platform-specific. A host
+      # build also runs the engine's gtests, which an Android cross build never
+      # does. What it cannot do is produce a shippable .so; that stays
+      # android-shared-engine's job, and it is already fast.
+      - name: gn gen (host)
         run: |
           cd src
           vpython3 flutter/tools/gn \
-            --android \
-            --android-cpu arm64 \
+            --linux \
+            --linux-cpu arm64 \
             --runtime-mode=release \
-            --target-dir=android_release_arm64 \
+            --target-dir=linux_release_arm64 \
             --no-lto \
             --no-prebuilt-dart-sdk \
             --no-goma \
@@ -243,7 +234,7 @@ jobs:
       - name: ninja (warms ccache)
         continue-on-error: true
         run: |
-          ninja -C src/out/android_release_arm64 flutter/rust:rustflutter_engine || true
+          ninja -C src/out/linux_release_arm64 flutter/rust:rustflutter_engine || true
           ccache --show-stats || true
 
       - name: Pack ccache
@@ -274,7 +265,13 @@ jobs:
       # would spend minutes re-compressing them into a slightly smaller file
       # that takes longer to download -- the one thing this workflow exists to
       # avoid.
+      #
+      # if: always() on both. Every step between the sync and here can fail --
+      # one of them did, and it cost a 1.2 GB bundle that took eight minutes to
+      # produce and eleven to download. The artifacts are the job's output; a
+      # later step's failure is not a reason to withhold them.
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: engine-deps-${{ hashFiles('DEPS', 'tools/gclient.template') }}
           path: engine-deps.tar.zst
@@ -283,6 +280,7 @@ jobs:
           retention-days: 30
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: engine-ccache-${{ hashFiles('DEPS', 'tools/gclient.template') }}
           path: engine-ccache.tar.zst
