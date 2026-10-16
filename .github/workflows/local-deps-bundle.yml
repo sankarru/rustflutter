@@ -68,7 +68,7 @@ permissions:
 
 jobs:
   bundle:
-    name: DEPS tree + warm host ccache
+    name: DEPS tree + warm android ccache
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 480
     env:
@@ -113,9 +113,21 @@ jobs:
           ccache --version | head -1
           ccache --set-config=max_size="$CCACHE_MAXSIZE"
 
+      # depot_tools' clone from googlesource 503s often enough to be worth a retry --
+      # it failed a whole run here with "RPC failed; HTTP 503" while nothing was
+      # wrong with the workflow.
       - name: Set up depot_tools
         run: |
-          git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          set -eux
+          for attempt in 1 2 3 4 5; do
+            if git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git; then
+              break
+            fi
+            echo "attempt $attempt failed; retrying"
+            rm -rf depot_tools
+            sleep $((attempt * 10))
+          done
+          test -d depot_tools
           echo "$GITHUB_WORKSPACE/depot_tools" >> "$GITHUB_PATH"
 
       # depot_tools' ninja and gn are shims that refuse to run unbootstrapped.
@@ -152,23 +164,53 @@ jobs:
           python3 src/build/linux/sysroot_scripts/install-sysroot.py --arch=arm64
           du -sh src/build/linux/debian_bullseye_arm64-sysroot
 
-      # Packed immediately after the sync, before anything that can fail. An earlier
-      # version packed it at the end, and an NDK step that failed took the whole
-      # bundle down with it -- which is the one outcome this job cannot have,
-      # because it is the only artifact here that cannot be produced another
-      # way. Everything after this point is best-effort.
+      # Packed directly after the sync, before anything that can fail, and guarded
+      # against its own failure rather than being allowed to abort the job:
+      # when gclient sync is skipped, tar is handed three paths that do not
+      # exist and exits non-zero, which failed a run here by taking the
+      # artifact with it.
       - name: Pack the DEPS tree
         if: always()
         run: |
-          set -eux
           time tar -I 'zstd -12 -T0 -q' -cf engine-deps.tar.zst \
             --exclude='.git' \
             src/third_party \
             src/flutter/third_party \
             src/flutter/buildtools \
-            .gclient
+            .gclient || echo "DEPS tree is not there -- shipping an empty bundle"
           ls -la engine-deps.tar.zst
           df -h /
+
+      # The NDK, from the aarch64 build of it rather than from Google's CDN.
+      #
+      # gn reaches for `prebuilt/linux-x86_64` on every host CPU (config.gni:29
+      # maps all three of x64/x86/arm64 to "x86_64"), and Google's own NDKs put
+      # x86_64 binaries in that directory, so they cannot execute on this
+      # runner at all:
+      #
+      #   ./tools/local_android_ndk.sh /tmp/ndk/android-ndk-r28b
+      #   prebuilt : .../prebuilt/linux-x86_64  (config.gni: android_host_arch=x86_64)
+      #   that clang will not run on this host
+      #
+      # SnowNF/ndk-aarch64-linux publishes r29 rebuilt for an aarch64 host, which
+      # is the same NDK a local machine runs -- and being the same NDK is the
+      # point. A cache warmed with a different compiler is a cache that misses,
+      # and this is the compiler both sides use.
+      #
+      # The sha1 is the publisher's, checked rather than trusted: a 1.8 GB
+      # download that turns out to be a different NDK would warm a cache with
+      # keys nothing on this machine can produce.
+      - name: Fetch the NDK and shim it into place
+        run: |
+          set -eux
+          NDK_URL="https://github.com/SnowNF/ndk-aarch64-linux/releases/download/0.0.2/android-ndk-r29-linux-aarch64.tar.gz"
+          curl -fSL --retry 3 -o /tmp/ndk.tar.gz "$NDK_URL"
+          echo "4ed2321b011cd8cada3543057d45118e167d5411  /tmp/ndk.tar.gz" | sha1sum -c -
+          mkdir -p /tmp/ndk
+          tar -xzf /tmp/ndk.tar.gz -C /tmp/ndk
+          rm -f /tmp/ndk.tar.gz
+          ls /tmp/ndk
+          ./tools/local_android_ndk.sh /tmp/ndk/android-ndk-r29
 
       # What landed, and how big. The compression ratio is not uniform: a
       # directory of jars or prebuilt clang will not shrink, one of sources
@@ -188,38 +230,23 @@ jobs:
           ls -d src/flutter/third_party/android_tools 2>/dev/null \
             || echo "android_tools: absent (DEPS:27 gates it to mac/linux-x64)"
 
-      # A host linux-arm64 configuration. Not the Android one, and the reason is
-      # worth recording because it cost a run to find out.
+      # The Android configuration, because that is what a local build runs, and
+      # because warming anything else hands back a cache keyed on a different set
+      # of flags that misses on every edge that matters.
       #
-      # The Android configuration needs an NDK, and gn reaches for
-      # `prebuilt/linux-x86_64` even on an arm64 host (config.gni:29 maps every
-      # host CPU to "x86_64"). Google builds NDKs whose tools in that directory
-      # are x86_64 binaries:
-      #
-      #   $ ./tools/local_android_ndk.sh /tmp/ndk/android-ndk-r28b
-      #   prebuilt : .../prebuilt/linux-x86_64  (config.gni: android_host_arch=x86_64)
-      #   that clang will not run on this host
-      #
-      # So an arm64 runner cannot build the Android configuration with any NDK
-      # it can obtain, and the x64 Android build that can (`android-shared-engine`)
-      # keys its ccache on `buildtools/linux-x64/clang`, which shares nothing
-      # with this machine. There is no cache a CI runner can hand this box that
-      # would serve an Android build here.
-      #
-      # A host build needs no NDK, and it is the configuration whose C++ is the
-      # same C++ -- flow/compositing_context.cc, the shell's platform-view
-      # delegate, the rf_* FFI, none of which are platform-specific. A host
-      # build also runs the engine's gtests, which an Android cross build never
-      # does. What it cannot do is produce a shippable .so; that stays
-      # android-shared-engine's job, and it is already fast.
-      - name: gn gen (host)
+      # It is buildable here only because of the NDK step above. Google's NDKs
+      # cannot run on an arm64 host, and the x64 Android build that can
+      # (android-shared-engine) keys its cache on `buildtools/linux-x64/clang`,
+      # which shares nothing with this machine. The aarch64 NDK is what makes
+      # this configuration warmable here at all.
+      - name: gn gen (android)
         run: |
           cd src
           vpython3 flutter/tools/gn \
-            --linux \
-            --linux-cpu arm64 \
+            --android \
+            --android-cpu arm64 \
             --runtime-mode=release \
-            --target-dir=linux_release_arm64 \
+            --target-dir=android_release_arm64 \
             --no-lto \
             --no-prebuilt-dart-sdk \
             --no-goma \
@@ -234,7 +261,7 @@ jobs:
       - name: ninja (warms ccache)
         continue-on-error: true
         run: |
-          ninja -C src/out/linux_release_arm64 flutter/rust:rustflutter_engine || true
+          ninja -C src/out/android_release_arm64 flutter/rust:rustflutter_engine || true
           ccache --show-stats || true
 
       - name: Pack ccache
