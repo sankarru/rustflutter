@@ -2,23 +2,58 @@ name: local-deps-bundle
 
 # Makes an engine build possible on a machine that cannot afford one.
 #
-# Two things stand between a fresh clone and a local `ninja`, and this workflow
-# ships both:
-#
 #   engine-deps-<hash>.tar.zst   everything DEPS creates -- third_party, the
 #                                CIPD toolchains, gn, ninja, skia, icu, angle,
 #                                harfbuzz. Fetching this is a file copy; running
 #                                `gclient sync` for it is a 13 GB negotiation
-#                                with every upstream's servers.
-#   engine-ccache-<hash>.tar.zst a populated ccache, so that first local `ninja`
-#                                hits cache instead of compiling 5272 targets.
+#                                with every upstream.
+#   engine-ccache-<hash>.tar.zst a ccache warmed by a linux-arm64 host build, so
+#                                that a local `ninja` hits cache instead of
+#                                compiling 5272 targets from nothing.
 #
-# The build this warms is byte-for-byte the one `android-shared-engine.yml`
-# builds, down to the gn arguments, so the cache keys match. See below for why
-# the runner has to be arm.
+# This builds nothing that ships. It is a distribution mechanism for inputs.
 #
-# Nothing here changes what gets built. It is a distribution mechanism for
-# inputs, not a build.
+# ## Why an arm runner, and why a *host* build
+#
+# ccache keys an object on the compiler binary itself -- its content hash, plus
+# every flag and the preprocessed source. DEPS ships a separate clang per host
+# CPU (`buildtools/linux-x64/clang`, `buildtools/linux-arm64/clang`), so a
+# ccache warmed on an x64 runner cannot produce a single hit on an arm64
+# machine. Hence `ubuntu-24.04-arm`.
+#
+# What it warms is a *host* linux-arm64 build rather than an Android one, for
+# two reasons.
+#
+# The Android configuration needs an NDK at a hardcoded path:
+#
+#   build/config/android/config.gni:59
+#     android_ndk_root = "//flutter/third_party/android_tools/sdk/ndk/28.2.13676358"
+#
+# inside the DEPS tree, and `DEPS:27` populates that tree only on macOS or
+# linux-x64:
+#
+#   'download_android_deps': 'host_os == "mac" or
+#                            (host_os == "linux" and host_cpu == "x64")'
+#
+# Widening that condition to arm64 does not help -- there is no arm64 package
+# to widen it to. `cipd ensure` answers:
+#
+#   failed to resolve flutter/android/sdk/all/linux-arm64@version:37v2:
+#     no such package: flutter/android/sdk/all/linux-arm64
+#   failed to resolve perfetto/trace_to_text/linux-arm64@git_tag:v25.0:
+#     no such package: perfetto/trace_to_text/linux-arm64
+#
+# and Google's CDN serves NDKs under release names (r26b, r28c) and not under
+# the build numbers Flutter pins, so "just download 28.2.13676358" is not
+# available either. An Android build on an arm64 host therefore wants an NDK
+# that is already installed locally, which is what
+# `tools/local_android_ndk.sh` exists to accommodate.
+#
+# And it is the right thing to warm regardless: every line of engine C++ that
+# touches platform views -- flow/compositing_context.cc, the shell's
+# platform-view delegate, the rf_* FFI -- is platform-independent, so a host
+# build covers it. A host build also runs the engine's own gtest suite, which an
+# Android cross build never does.
 
 on:
   workflow_dispatch:
@@ -34,49 +69,15 @@ permissions:
 
 jobs:
   bundle:
-    name: DEPS tree + warm ccache
-    # arm, and this is the whole point of the workflow.
-    #
-    # ccache keys an object on the compiler binary itself -- its hash, plus
-    # every flag and the preprocessed source. Flutter's DEPS ships a separate
-    # clang per host CPU (`buildtools/linux-x64/clang`,
-    # `buildtools/linux-arm64/clang`), so a ccache warmed on an x64 runner
-    # cannot produce a single hit on an arm64 machine: different compiler,
-    # different hash, different key. An arm runner warms a cache that an arm
-    # machine actually hits.
-    #
-    # One thing an arm64 sync does not fetch, and it is fatal rather than
-    # merely inconvenient. `DEPS:27` gates it:
-    #
-    #   'download_android_deps': 'host_os == "mac" or
-    #                              (host_os == "linux" and host_cpu == "x64")'
-    #
-    # so without intervention the tree arrives with no
-    # `flutter/third_party/android_tools`, and `build/config/android/config.gni`
-    # resolves the NDK straight out of that path:
-    #
-    #   android_ndk_root = "//flutter/third_party/android_tools/sdk/ndk/28.2.13676358"
-    #   llvm_android_toolchain_root = ".../prebuilt/${android_host_os}-${android_host_arch}"
-    #
-    # `android_host_arch` is `arm64` here, so it wants a `linux-arm64`
-    # toolchain. The result without the patch below is a ninja that cannot start:
-    #
-    #   ninja: error: '.../android_tools/sdk/ndk/28.2.13676358/sources/android/
-    #            cpufeatures/cpu-features.c', needed by '...cpu_features.o',
-    #            missing and no known rule to make it
-    #
-    # The patch widens the condition and lets gclient do the fetching, which is
-    # better than fetching the NDK by hand: gclient already has whatever auth
-    # CIPD needs, and the bundle then carries the exact NDK the engine pins, so
-    # a local build compiles against the same compiler CI warmed.
+    name: DEPS tree + warm host ccache
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 480
     env:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       # The reason a restored ccache scored 0/4560 on its first outing: ccache
       # keys the compiler on size and mtime by default, and DEPS unpacks a
-      # fresh clang every run, so every object looked like a different
-      # compiler. Chromium's own CI sets this for the same reason.
+      # fresh clang every run, so every object looked like it came from a
+      # different compiler. Chromium's own CI sets this for the same reason.
       CCACHE_COMPILERCHECK: "content"
       CCACHE_MAXSIZE: "8G"
 
@@ -99,8 +100,7 @@ jobs:
           free -g
           df -h /
 
-      # Same free-the-disk dance as android-shared-engine. The bundle needs room
-      # for the 13 GB tree AND the compressed copy AND the ninja output.
+      # Room for the 13 GB tree, the compressed copy of it, and a host build.
       - name: Free runner disk
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
@@ -123,32 +123,20 @@ jobs:
       - name: Bootstrap depot_tools
         run: update_depot_tools --no-registry
 
-      # Widens DEPS:27 to arm64 so the Android SDK -- and with it the NDK the
-      # engine pins at 28.2.13676358 -- is fetched. Asserted afterwards, because
-      # a sed that does not match leaves gclient happy and the failure lands
-      # three steps later as an unrecognisable ninja error.
-      - name: Widen download_android_deps to arm64
-        run: |
-          set -eux
-          cp DEPS DEPS.orig
-          sed -i 's/host_cpu == "x64")/host_cpu == "x64" or host_cpu == "arm64")/' DEPS
-          grep -n 'download_android_deps' DEPS
-          grep -q 'host_cpu == "arm64"' DEPS
-
+      # Unmodified. On an arm64 host `download_android_deps` is false, which
+      # means android_tools and the NDK are absent -- expected, and what
+      # tools/local_android_ndk.sh is for. Editing DEPS to widen the condition
+      # is not the fix; the packages it would ask for do not exist.
       - name: gclient sync
         run: |
           cp tools/gclient.template .gclient
           gclient sync --no-history --nohooks
           gclient runhooks
-          # Restore it: the patch is a property of this runner, not of the tree,
-          # and a dirty DEPS would be picked up by anything that reads it next.
-          mv DEPS.orig DEPS
-          git diff --stat -- DEPS || true
 
-      # What landed, and how big, per directory -- because the compression ratio
-      # is not uniform and the biggest directories are the ones worth arguing
-      # about. A directory that is already compressed (jars, .so, prebuilt
-      # clang) will not shrink; one full of sources will roughly halve.
+      # What landed, and how big. The compression ratio is not uniform: a
+      # directory of jars or prebuilt clang will not shrink, one of sources
+      # roughly halves. This is how a bundle that is "13 GB" becomes 1.2 GB,
+      # and it is the only way to know that without shipping it first.
       - name: Report what DEPS fetched
         run: |
           df -h /
@@ -156,27 +144,22 @@ jobs:
           echo "--- largest 25 under the DEPS roots ---"
           du -sm src/third_party/* src/flutter/third_party/* src/flutter/buildtools/* 2>/dev/null \
             | sort -rn | head -25
-          echo "--- git dirs, which a no-history sync still leaves behind ---"
-          du -sh $(find src/third_party src/flutter/third_party -maxdepth 2 -name .git 2>/dev/null) 2>/dev/null \
-            | tail -3 || true
-          echo "--- the arm64 toolchain, and an SDK that is now present ---"
-          ls src/flutter/buildtools/ 2>/dev/null
-          ls -d src/flutter/third_party/android_tools/sdk/ndk/* 2>/dev/null \
-            || { echo "android_tools: STILL ABSENT -- the DEPS patch did not match"; exit 1; }
-          echo "--- the toolchain dir gn will look for (linux-arm64) ---"
-          ls -d src/flutter/third_party/android_tools/sdk/ndk/*/toolchains/llvm/prebuilt/*/ 2>/dev/null
-          echo "--- and the compiler-runtime version config.gni:128 will ask for ---"
-          ls -d src/flutter/third_party/android_tools/sdk/ndk/*/toolchains/llvm/prebuilt/*/lib/clang/*/lib/linux/aarch64 2>/dev/null
+          echo "--- the arm64 toolchain this ccache will key on ---"
+          ls src/flutter/buildtools/linux-arm64/ 2>/dev/null
+          src/flutter/buildtools/linux-arm64/clang/bin/clang --version 2>/dev/null | head -1
+          echo "--- and the SDK that is deliberately absent on arm64 ---"
+          ls -d src/flutter/third_party/android_tools 2>/dev/null \
+            || echo "android_tools: absent (DEPS:27 gates it to mac/linux-x64)"
 
-      # The bundle. Exactly the three roots DEPS populates -- the repository's
-      # own `src/flutter`, `src/build` and `src/BUILD.gn` are in the clone and
-      # must not be shadowed by whatever is in the tar.
+      # The bundle. Exactly the roots DEPS populates -- the repository's own
+      # `src/flutter`, `src/build` and `src/BUILD.gn` are in the clone and must
+      # not be shadowed by whatever is in the tar.
       #
-      # zstd -12 over xz: the download that follows is the expensive half, and
-      # -12 costs a few hundred MB against -9e for minutes of runner time and a
-      # much narrower compression window.
+      # zstd -12 over xz: the download is the expensive half, and -12 costs a
+      # few hundred MB against -9e for minutes of runner time and a far wider
+      # compression window.
       #
-      # --exclude on .git: gclient still writes one per checkout even with
+      # --exclude on .git: gclient writes one per checkout even with
       # --no-history, and they are dead weight in a tarball nobody will sync.
       - name: Pack the DEPS tree
         run: |
@@ -190,45 +173,45 @@ jobs:
           ls -la engine-deps.tar.zst
           df -h /
 
-      - name: gn gen
+      - name: gn gen (host)
         run: |
           cd src
           vpython3 flutter/tools/gn \
-            --android \
-            --android-cpu arm64 \
+            --linux \
+            --linux-cpu arm64 \
             --runtime-mode=release \
-            --target-dir=android_release_arm64 \
+            --target-dir=linux_release_arm64 \
             --no-lto \
             --no-prebuilt-dart-sdk \
             --no-goma \
             --no-rbe \
             --ccache
 
-      # Warms the cache. Failure here is not fatal to the workflow -- the deps
-      # bundle is the part that cannot be produced any other way, and a ccache
-      # miss costs time while a failed step costs the bundle too. So this is
-      # allowed to fail, and the packing below checks what it actually got.
+      # Allowed to fail, and that is deliberate. The ccache is the part that can
+      # be regenerated and the part most likely to hit a fresh toolchain
+      # problem; the DEPS bundle above is the part that cannot be produced any
+      # other way. Letting this fail the job would throw the bundle away with
+      # it, which is the trade the previous version of this workflow made badly.
       - name: ninja (warms ccache)
         continue-on-error: true
         run: |
-          ninja -C src/out/android_release_arm64 \
-            flutter/rust:rustflutter_engine_shared \
-            flutter/rust:rustflutter_link_manifest || true
+          ninja -C src/out/linux_release_arm64 flutter/rust:rustflutter_engine || true
           ccache --show-stats || true
 
       - name: Pack ccache
+        if: always()
         run: |
           set -eux
           du -sh .ccache || true
           ccache -s || true
-          # Whatever landed is what gets shipped. An empty or missing ccache
-          # must not fail this step, or a runner that could not build takes the
-          # deps bundle down with it.
+          # Whatever landed is what ships. An empty or missing ccache must not
+          # fail this step, or a runner that could not build takes the deps
+          # bundle down with it.
           if [ -d .ccache ] && [ -n "$(ls -A .ccache 2>/dev/null)" ]; then
             time tar -I 'zstd -6 -T0 -q' -cf engine-ccache.tar.zst .ccache
             ls -la engine-ccache.tar.zst
           else
-            echo "no ccache to pack"
+            echo "no ccache to pack -- the ninja step above did not produce one"
             tar -I 'zstd -6 -T0 -q' -cf engine-ccache.tar.zst --files-from /dev/null
           fi
 
@@ -241,8 +224,8 @@ jobs:
 
       # compression-level: 0. Both payloads are already zstd, and upload-artifact
       # would spend minutes re-compressing them into a slightly smaller file
-      # that takes longer to download -- which is the one thing this workflow
-      # exists to avoid.
+      # that takes longer to download -- the one thing this workflow exists to
+      # avoid.
       - uses: actions/upload-artifact@v4
         with:
           name: engine-deps-${{ hashFiles('DEPS', 'tools/gclient.template') }}
