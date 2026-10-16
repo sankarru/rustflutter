@@ -20,6 +20,14 @@ src/flutter/third_party/**/*
 src/flutter/buildtools/
 src/flutter/prebuilts/
 
+# Prebuilt engine fetched from the android-shared-engine artifact, plus the
+# APK this tree packages from it. A fetched engine is a build input and an APK
+# is build output; neither belongs in the repository, and together they are
+# ~25 MB that `git add -A` would otherwise sweep up.
+# The directory name has to end in _arm64: build_apks.py reads the ABI off it.
+/engine_arm64/
+/engine/
+
 # 工具缓存
 .dart_tool/
 __pycache__/
