@@ -265,8 +265,16 @@ jobs:
           mkdir -p /tmp/ndk
           tar -xzf /tmp/ndk.tar.gz -C /tmp/ndk
           rm -f /tmp/ndk.tar.gz
-          ls /tmp/ndk
-          ./tools/local_android_ndk.sh /tmp/ndk/android-ndk-r29
+          # The directory inside the tarball is called "r29", not
+          # "android-ndk-r29", which is what the asset is named. Taking
+          # whichever single directory is there is not a guess; hardcoding the
+          # asset's name is how a run gets to 'no NDK at ...' after a
+          # successful 1.7 GB download and a matching checksum.
+          NDK_DIR="$(find /tmp/ndk -maxdepth 1 -mindepth 1 -type d | head -1)"
+          echo "extracted to $NDK_DIR"
+          test -n "$NDK_DIR"
+          cat "$NDK_DIR/source.properties" || true
+          ./tools/local_android_ndk.sh "$NDK_DIR"
 
       # What landed, and how big. The compression ratio is not uniform: a
       # directory of jars or prebuilt clang will not shrink, one of sources
