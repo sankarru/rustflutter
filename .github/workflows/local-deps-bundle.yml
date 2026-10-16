@@ -134,19 +134,60 @@ jobs:
       - name: Bootstrap depot_tools
         run: update_depot_tools --no-registry
 
-      # Unmodified. On an arm64 host `download_android_deps` is false, which
-      # means android_tools and the NDK are absent. Editing DEPS to widen the
-      # condition is not the fix; the packages it would ask for do not exist:
+      # Retried, and slower on purpose.
       #
-      #   failed to resolve flutter/android/sdk/all/linux-arm64: no such package
-      #   failed to resolve perfetto/trace_to_text/linux-arm64: no such package
+      # googlesource answers 503 under load, and it does so in the middle of a
+      # fetch, which kills the sync partway through:
       #
-      # The NDK comes from Google's CDN instead (next step).
+      #   error: RPC failed; HTTP 503 curl 22 The requested URL returned error: 503
+      #   fatal: expected 'packfile'
+      #
+      # That killed a whole run here, and the run before it at the depot_tools
+      # clone -- the same server, the same status. `--jobs 4` rather than the
+      # default 12 keeps fewer fetches in flight at once, and the retry picks up
+      # where it stopped because gclient is incremental. The sentinels below are
+      # what decides whether it actually worked.
       - name: gclient sync
         run: |
+          set -eu
           cp tools/gclient.template .gclient
-          gclient sync --no-history --nohooks
-          gclient runhooks
+          for attempt in 1 2 3 4; do
+            echo "=== gclient sync, attempt $attempt ==="
+            if gclient sync --no-history --nohooks --jobs 4; then
+              break
+            fi
+            echo "attempt $attempt failed; retrying"
+            sleep $((attempt * 20))
+          done
+          gclient runhooks || echo "runhooks failed; continuing"
+
+      # Whether the sync actually completed. A half-synced tree packs into a
+      # perfectly plausible-looking artifact that fails confusingly on the
+      # machine that unpacks it, and one did exactly that here: a 387 MB bundle
+      # that was a fraction of the real 1.2 GB. Every one of these is a
+      # directory DEPS creates, so all of them or none of them.
+      - name: Check the sync completed
+        run: |
+          set -eu
+          missing=0
+          for p in \
+            src/flutter/buildtools/linux-arm64/clang/bin/clang \
+            src/flutter/buildtools/linux-x64/clang/bin/clang \
+            src/flutter/third_party/gn/gn \
+            src/flutter/third_party/skia \
+            src/flutter/third_party/icu \
+            src/flutter/third_party/angle \
+            src/flutter/third_party/harfbuzz \
+            src/flutter/third_party/vulkan-deps
+          do
+            if [ -e "$p" ]; then echo "  ok      $p"; else echo "  MISSING $p"; missing=1; fi
+          done
+          if [ "$missing" != "0" ]; then
+            echo "::error::gclient sync did not complete; the bundle would be partial"
+            echo "SYNC_INCOMPLETE=1" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "SYNC_INCOMPLETE=0" >> "$GITHUB_ENV"
 
       # Chromium's arm64 host sysroot, which the build asserts on
       # (build/config/sysroot.gni:35) and which neither DEPS nor gclient
@@ -159,6 +200,7 @@ jobs:
       # it is not part of the bundle either -- which is why a machine that only
       # untars the deps has to run this too.
       - name: Install the arm64 host sysroot
+        if: env.SYNC_INCOMPLETE == '0'
         run: |
           set -eux
           python3 src/build/linux/sysroot_scripts/install-sysroot.py --arch=arm64
@@ -169,15 +211,28 @@ jobs:
       # when gclient sync is skipped, tar is handed three paths that do not
       # exist and exits non-zero, which failed a run here by taking the
       # artifact with it.
+      #
+      # Refuses to ship a partial tree. The sentinel step above set
+      # SYNC_INCOMPLETE, and a bundle that is three-fifths of a bundle looks
+      # exactly like a bundle right up until the machine that unpacks it hits a
+      # missing header and something several steps from the cause.
       - name: Pack the DEPS tree
         if: always()
         run: |
+          rm -f engine-deps.tar.zst
+          if [ "${SYNC_INCOMPLETE:-1}" != "0" ]; then
+            echo "::error::refusing to pack a partial DEPS tree"
+            printf 'this bundle is empty because gclient sync did not complete\n' \
+              | tar -I 'zstd -12 -q' -cf engine-deps.tar.zst --files-from /dev/stdin
+            ls -la engine-deps.tar.zst
+            exit 0
+          fi
           time tar -I 'zstd -12 -T0 -q' -cf engine-deps.tar.zst \
             --exclude='.git' \
             src/third_party \
             src/flutter/third_party \
             src/flutter/buildtools \
-            .gclient || echo "DEPS tree is not there -- shipping an empty bundle"
+            .gclient
           ls -la engine-deps.tar.zst
           df -h /
 
@@ -201,6 +256,7 @@ jobs:
       # download that turns out to be a different NDK would warm a cache with
       # keys nothing on this machine can produce.
       - name: Fetch the NDK and shim it into place
+        if: env.SYNC_INCOMPLETE == '0'
         run: |
           set -eux
           NDK_URL="https://github.com/SnowNF/ndk-aarch64-linux/releases/download/0.0.2/android-ndk-r29-linux-aarch64.tar.gz"
@@ -217,6 +273,7 @@ jobs:
       # roughly halves. This is how a bundle that is "13 GB" becomes 1.2 GB,
       # and it is the only way to know that without shipping it first.
       - name: Report what DEPS fetched
+        if: env.SYNC_INCOMPLETE == '0'
         run: |
           df -h /
           du -sh src/third_party src/flutter/third_party src/flutter/buildtools 2>/dev/null
@@ -240,6 +297,7 @@ jobs:
       # which shares nothing with this machine. The aarch64 NDK is what makes
       # this configuration warmable here at all.
       - name: gn gen (android)
+        if: env.SYNC_INCOMPLETE == '0'
         run: |
           cd src
           vpython3 flutter/tools/gn \
@@ -259,6 +317,7 @@ jobs:
       # other way. Letting this fail the job would throw the bundle away with
       # it, which is the trade the previous version of this workflow made badly.
       - name: ninja (warms ccache)
+        if: env.SYNC_INCOMPLETE == '0'
         continue-on-error: true
         run: |
           ninja -C src/out/android_release_arm64 flutter/rust:rustflutter_engine || true
