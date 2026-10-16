@@ -45,18 +45,30 @@ jobs:
     # different hash, different key. An arm runner warms a cache that an arm
     # machine actually hits.
     #
-    # The consequence is the one thing DEPS will not fetch here. `DEPS:27`:
+    # One thing an arm64 sync does not fetch, and it is fatal rather than
+    # merely inconvenient. `DEPS:27` gates it:
     #
     #   'download_android_deps': 'host_os == "mac" or
     #                              (host_os == "linux" and host_cpu == "x64")'
     #
-    # so an arm64 Linux host syncs without `flutter/third_party/android_tools`
-    # (the SDK) or `android_embedding_dependencies`. That is acceptable: the SDK
-    # is a local install passed to `build_apks.py --sdk`, and nothing in
-    # `//flutter/rust:rustflutter_engine_shared` compiles the embedding's Java.
-    # A machine that wants the bundled SDK should build this on an x64 runner
-    # and give up on ccache reuse, which is the trade `android-shared-engine`
-    # already makes.
+    # so without intervention the tree arrives with no
+    # `flutter/third_party/android_tools`, and `build/config/android/config.gni`
+    # resolves the NDK straight out of that path:
+    #
+    #   android_ndk_root = "//flutter/third_party/android_tools/sdk/ndk/28.2.13676358"
+    #   llvm_android_toolchain_root = ".../prebuilt/${android_host_os}-${android_host_arch}"
+    #
+    # `android_host_arch` is `arm64` here, so it wants a `linux-arm64`
+    # toolchain. The result without the patch below is a ninja that cannot start:
+    #
+    #   ninja: error: '.../android_tools/sdk/ndk/28.2.13676358/sources/android/
+    #            cpufeatures/cpu-features.c', needed by '...cpu_features.o',
+    #            missing and no known rule to make it
+    #
+    # The patch widens the condition and lets gclient do the fetching, which is
+    # better than fetching the NDK by hand: gclient already has whatever auth
+    # CIPD needs, and the bundle then carries the exact NDK the engine pins, so
+    # a local build compiles against the same compiler CI warmed.
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 480
     env:
@@ -111,11 +123,27 @@ jobs:
       - name: Bootstrap depot_tools
         run: update_depot_tools --no-registry
 
+      # Widens DEPS:27 to arm64 so the Android SDK -- and with it the NDK the
+      # engine pins at 28.2.13676358 -- is fetched. Asserted afterwards, because
+      # a sed that does not match leaves gclient happy and the failure lands
+      # three steps later as an unrecognisable ninja error.
+      - name: Widen download_android_deps to arm64
+        run: |
+          set -eux
+          cp DEPS DEPS.orig
+          sed -i 's/host_cpu == "x64")/host_cpu == "x64" or host_cpu == "arm64")/' DEPS
+          grep -n 'download_android_deps' DEPS
+          grep -q 'host_cpu == "arm64"' DEPS
+
       - name: gclient sync
         run: |
           cp tools/gclient.template .gclient
           gclient sync --no-history --nohooks
           gclient runhooks
+          # Restore it: the patch is a property of this runner, not of the tree,
+          # and a dirty DEPS would be picked up by anything that reads it next.
+          mv DEPS.orig DEPS
+          git diff --stat -- DEPS || true
 
       # What landed, and how big, per directory -- because the compression ratio
       # is not uniform and the biggest directories are the ones worth arguing
@@ -131,10 +159,14 @@ jobs:
           echo "--- git dirs, which a no-history sync still leaves behind ---"
           du -sh $(find src/third_party src/flutter/third_party -maxdepth 2 -name .git 2>/dev/null) 2>/dev/null \
             | tail -3 || true
-          echo "--- confirms the arm64 toolchain and the absent SDK ---"
+          echo "--- the arm64 toolchain, and an SDK that is now present ---"
           ls src/flutter/buildtools/ 2>/dev/null
-          ls -d src/flutter/third_party/android_tools 2>/dev/null \
-            || echo "android_tools: absent (expected on arm64; DEPS:27)"
+          ls -d src/flutter/third_party/android_tools/sdk/ndk/* 2>/dev/null \
+            || { echo "android_tools: STILL ABSENT -- the DEPS patch did not match"; exit 1; }
+          echo "--- the toolchain dir gn will look for (linux-arm64) ---"
+          ls -d src/flutter/third_party/android_tools/sdk/ndk/*/toolchains/llvm/prebuilt/*/ 2>/dev/null
+          echo "--- and the compiler-runtime version config.gni:128 will ask for ---"
+          ls -d src/flutter/third_party/android_tools/sdk/ndk/*/toolchains/llvm/prebuilt/*/lib/clang/*/lib/linux/aarch64 2>/dev/null
 
       # The bundle. Exactly the three roots DEPS populates -- the repository's
       # own `src/flutter`, `src/build` and `src/BUILD.gn` are in the clone and
