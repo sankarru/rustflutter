@@ -149,6 +149,7 @@ pub mod pickers;
 pub mod platform;
 pub mod platform_menu_bar;
 pub mod platform_tree;
+pub mod platform_view;
 pub mod popup;
 pub mod preferred_size;
 pub mod presence;

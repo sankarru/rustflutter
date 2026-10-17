@@ -1829,6 +1829,25 @@ impl LayerTree {
         unsafe { sys::rf_layer_tree_push_blur(self.raw, sigma_x, sigma_y) };
     }
 
+    /// Places a platform view at `rect`.
+    ///
+    /// Not a layer the compositor rasterizes: the host's own `View` is
+    /// composited by Android over the surface, so this carries geometry and
+    /// identity and no pixels. `view_id` is the instance the host created, not
+    /// the kind -- a screen with three maps has one view type and three ids.
+    pub fn push_platform_view(&mut self, view_id: i64, rect: Rect) {
+        unsafe {
+            sys::rf_layer_tree_push_platform_view(
+                self.raw,
+                view_id,
+                rect.left,
+                rect.top,
+                rect.right - rect.left,
+                rect.bottom - rect.top,
+            )
+        };
+    }
+
     /// Closes the innermost open layer. Popping past the root is ignored.
     pub fn pop(&mut self) {
         unsafe { sys::rf_layer_tree_pop(self.raw) };

@@ -18,6 +18,11 @@ use std::ffi::CString;
 use std::os::raw::{c_char, c_int};
 use std::path::Path;
 
+/// The C ABI.
+///
+/// `pub(crate)` because nothing outside the crate should name an `rf_*`
+/// function: those are the engine's surface, not the framework's, and a caller
+/// reaching past the wrapper it was given is how the two drift apart.
 pub(crate) mod sys {
     use std::os::raw::{c_char, c_int};
 
@@ -264,6 +269,61 @@ pub(crate) mod sys {
         );
         pub fn rf_layer_tree_push_retained(tree: *mut RfLayerTree, layer: *mut RfLayer);
         pub fn rf_layer_free(layer: *mut RfLayer);
+
+        // -- Platform views ----------------------------------------------------
+        //
+        // A platform view is a real Android View -- a WebView, a map, a video
+        // player -- that the host parents into the window beside the Flutter
+        // surface, rather than something the framework rasterises. The engine
+        // carries only its identity and its rectangle, as a PlatformViewLayer
+        // in the tree; the View itself lives on the other side of the JNI.
+        //
+        // This is the whole surface. There is no pixel path, no texture, and no
+        // snapshot of the View's contents in either direction: a platform view
+        // is composited by Android, outside the display list entirely.
+        //
+        // `view_id` is the instance, not the kind. A screen with three maps has
+        // one view type and three ids, and `view_type` -- which says what to
+        // make -- is given once, at creation.
+
+        /// Pushes a platform view at `rect`, in the tree's own coordinates.
+        /// The view is created separately; pushing one that does not exist is a
+        /// no-op on the host side rather than an error, because a layer tree is
+        /// built before the host has necessarily created anything.
+        pub fn rf_layer_tree_push_platform_view(
+            tree: *mut RfLayerTree,
+            view_id: i64,
+            x: f32,
+            y: f32,
+            width: f32,
+            height: f32,
+        );
+
+        /// Asks the host to create the platform view `view_id` of kind
+        /// `view_type`. `creation_params` is an encoded StandardMessageCodec map
+        /// or null, and is owned by the host once this returns. Returns 0 on
+        /// success and non-zero when the host has no factory registered for
+        /// `view_type` -- which is what a plugin that was never installed looks
+        /// like, the same answer Flutter gives for one.
+        pub fn rf_platform_view_create(
+            view_id: i64,
+            view_type: *const c_char,
+            creation_params: *const u8,
+            params_length: usize,
+        ) -> c_int;
+
+        /// Destroys the platform view and releases the host's View. Called when
+        /// the framework drops the render object, not when it stops painting:
+        /// a platform view that scrolls off screen is still alive.
+        pub fn rf_platform_view_destroy(view_id: i64);
+
+        /// Moves and resizes an existing view. Sent every frame its rectangle
+        /// changes, which during a scroll is every frame.
+        pub fn rf_platform_view_set_bounds(view_id: i64, x: f32, y: f32, width: f32, height: f32);
+
+        /// Hides or shows the view without destroying it. A view scrolled out
+        /// of a viewport is invisible, not gone.
+        pub fn rf_platform_view_set_visible(view_id: i64, visible: bool);
 
         pub fn rf_image_decode(data: *const u8, length: usize) -> *mut RfImage;
         pub fn rf_image_from_pixels(pixels: *const u8, width: c_int, height: c_int)

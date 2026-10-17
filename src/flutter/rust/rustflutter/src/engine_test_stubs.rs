@@ -692,6 +692,19 @@ pub struct LayerCalls {
     pub display_lists: u32,
     /// Layers opened for keeping, by a repaint boundary that had to record.
     pub retainable: u32,
+    /// Platform views pushed into the tree, as layers of their own.
+    ///
+    /// Counted separately from the other layers rather than folded into
+    /// `pushes()`: a platform view is not a layer the compositor can rasterize.
+    /// Nothing the framework draws appears where it sits -- the host's own View
+    /// is composited by Android over the surface -- so "how much was drawn into
+    /// it" is the wrong question and `rects` staying flat is the correct answer,
+    /// not a missing one.
+    pub platform_views: u32,
+    /// Views the framework asked the host to create.
+    pub platform_views_created: u32,
+    /// Views the framework asked the host to destroy.
+    pub platform_views_destroyed: u32,
     /// Layers handed back from an earlier frame instead of being recorded.
     pub retained: u32,
     /// Layers recorded into again in place, by a boundary that kept one and
@@ -727,7 +740,9 @@ thread_local! {
         const { std::cell::Cell::new(LayerCalls {
             transforms: 0, offsets: 0, clip_rects: 0, clip_rounded_rects: 0,
             clip_paths: 0, opacities: 0, pops: 0, display_lists: 0,
-            retainable: 0, retained: 0, rerecorded: 0, rects: 0,
+            retainable: 0, platform_views: 0, platform_views_created: 0,
+            platform_views_destroyed: 0,
+            retained: 0, rerecorded: 0, rects: 0,
         }) };
 }
 
@@ -1091,6 +1106,21 @@ pub enum Drawn {
         dx: f32,
         dy: f32,
     },
+    /// A platform view, by **where it was placed and which view it is** -- the
+    /// id, not the kind. `viewType` says what to make and is given once at
+    /// creation; a screen with three maps has one view type and three ids, so
+    /// recording the type here would make three of them indistinguishable.
+    ///
+    /// Recorded as a layer even though nothing is drawn: the host's View is
+    /// composited by Android over the surface, so this carries geometry and
+    /// identity and no pixels at all.
+    PlatformViewLayer {
+        view_id: i64,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    },
     /// A path, by **where it was drawn and not what shape it is** -- see
     /// `StubPath`. A rounded rectangle and a rectangle of the same extent
     /// record identically.
@@ -1218,6 +1248,23 @@ impl Drawn {
                 right: right + dx,
                 bottom: bottom + dy,
             },
+            // A platform view is *placed* by this offset rather than drawn
+            // through it, so unlike a layer it has to move: the host's View is
+            // positioned in window coordinates and a scroll has to take the
+            // whole thing with it.
+            Drawn::PlatformViewLayer {
+                view_id,
+                x,
+                y,
+                width,
+                height,
+            } => Drawn::PlatformViewLayer {
+                view_id,
+                x: x + dx,
+                y: y + dy,
+                width,
+                height,
+            },
             Drawn::ClipRRectLayer {
                 left,
                 top,
@@ -1332,8 +1379,95 @@ impl Drawn {
             Drawn::OpacityLayer { .. } => self,
             // A layer's own transform is what moves; see `OffsetLayer`.
             Drawn::TransformLayer { .. } => self,
+            // ...but a platform view is positioned rather than drawn through,
+            // so it is the one layer kind that does take the offset. The
+            // distinction is the reason this match exists at all: everything
+            // else in this enum is either a delta or a position already
+            // relative to the surface, and a View in the window is neither.
+            Drawn::PlatformViewLayer { .. } => self,
         }
     }
+}
+
+/// One platform view's lifecycle, as the host was told about it.
+///
+/// Separate from [`Drawn`] because a platform view has no display list. What it
+/// draws is composited by Android over the surface, so the only record of it is
+/// what the framework asked the host to do -- and the ordering matters as much
+/// as the count, since a bounds update after a destroy is a bug that no counter
+/// would show.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PlatformViewOp {
+    Created {
+        view_id: i64,
+        view_type: String,
+        params_len: usize,
+    },
+    Bounds {
+        view_id: i64,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    },
+    Visible {
+        view_id: i64,
+        visible: bool,
+    },
+    Destroyed {
+        view_id: i64,
+    },
+}
+
+thread_local! {
+    static PLATFORM_VIEW_OPS: std::cell::RefCell<Vec<PlatformViewOp>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn note_platform_view(op: PlatformViewOp) {
+    PLATFORM_VIEW_OPS.with(|ops| ops.borrow_mut().push(op));
+}
+
+fn note_platform_view_created(
+    view_id: i64,
+    view_type: String,
+    params: *const u8,
+    params_len: usize,
+) {
+    // The bytes are only counted, never read. Decoding a StandardMessageCodec
+    // map here would be testing the host's codec with the framework's
+    // expectations, and the framework's job is to hand the bytes over.
+    let _ = params;
+    note(|calls| calls.platform_views_created += 1);
+    note_platform_view(PlatformViewOp::Created {
+        view_id,
+        view_type,
+        params_len,
+    });
+}
+
+fn note_platform_view_destroyed(view_id: i64) {
+    note_platform_view(PlatformViewOp::Destroyed { view_id });
+}
+
+fn note_platform_view_bounds(view_id: i64, x: f32, y: f32, width: f32, height: f32) {
+    note_platform_view(PlatformViewOp::Bounds {
+        view_id,
+        x,
+        y,
+        width,
+        height,
+    });
+}
+
+fn note_platform_view_visible(view_id: i64, visible: bool) {
+    note_platform_view(PlatformViewOp::Visible { view_id, visible });
+}
+
+/// Everything the framework asked the host to do to a platform view, in order.
+#[allow(dead_code)]
+pub fn platform_view_ops() -> Vec<PlatformViewOp> {
+    PLATFORM_VIEW_OPS.with(|ops| ops.borrow().clone())
 }
 
 thread_local! {
@@ -1517,6 +1651,68 @@ pub unsafe extern "C" fn rf_layer_tree_push_blur(
 pub unsafe extern "C" fn rf_layer_tree_pop(tree: *mut RfLayerTree) {
     note(|calls| calls.pops += 1);
     close_top();
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rf_layer_tree_push_platform_view(
+    tree: *mut RfLayerTree,
+    view_id: i64,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+) {
+    note(|calls| calls.platform_views += 1);
+    record(Drawn::PlatformViewLayer {
+        view_id,
+        x,
+        y,
+        width,
+        height,
+    });
+    open_container();
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rf_platform_view_create(
+    view_id: i64,
+    view_type: *const std::ffi::c_char,
+    creation_params: *const u8,
+    params_length: usize,
+) -> std::ffi::c_int {
+    let kind = if view_type.is_null() {
+        String::new()
+    } else {
+        // Safety: the caller is the framework, which always passes a NUL
+        // terminated string it built itself; null was handled above.
+        unsafe { std::ffi::CStr::from_ptr(view_type) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    note_platform_view_created(view_id, kind, creation_params, params_length);
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rf_platform_view_destroy(view_id: i64) {
+    note(|calls| calls.platform_views_destroyed += 1);
+    note_platform_view_destroyed(view_id);
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rf_platform_view_set_bounds(
+    view_id: i64,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+) {
+    note_platform_view_bounds(view_id, x, y, width, height);
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rf_platform_view_set_visible(view_id: i64, visible: bool) {
+    note_platform_view_visible(view_id, visible);
 }
 
 #[unsafe(no_mangle)]
