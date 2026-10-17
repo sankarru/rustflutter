@@ -1,0 +1,30 @@
+[package]
+name = "flower"
+version = "0.1.0"
+edition = "2024"
+publish = false
+# A library, like every other application here. The file is called main.rs
+# because the package's entry point is that file in the ordinary sense -- it
+# defines `rustflutter_app_main`, the symbol the host calls -- and not because
+# cargo should read it as a second, binary target, which would then want a
+# `fn main` this crate has no reason to have.
+autobins = false
+
+[lib]
+# `lib` as well as `cdylib` so `cargo check` and `cargo test` work; only the
+# cdylib is a shippable artifact. The name decides the file name, and
+# build_apks.py derives the APK's package id from it, so it has to stay `flower`.
+name = "flower"
+crate-type = ["lib", "cdylib"]
+path = "src/main.rs"
+
+[dependencies]
+# The framework, by path. Compiled from source with this crate, so the
+# application and the framework are one Rust compilation; what is linked in
+# rather than compiled is the C++ engine underneath them -- see build.rs.
+#
+# No `ureq` and no `mobile-sentinel` here, unlike `photo_scroller`: this one
+# draws a shape and runs a clock, so there is nothing to fetch and no platform
+# capability to ask for. The dependency list of an application is meant to say
+# what it needs, and this one says a great deal less than the others do.
+rustflutter = { path = "../../rustflutter" }

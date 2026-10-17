@@ -691,6 +691,63 @@ made will go on positioning a view that is not there.
   `PlatformViewContainer.setOpaqueOnly()` records this rather than leaving it
   as a surprise.
 
+## Writing an application: two things that cost an afternoon
+
+`apps/flower` is the newest one, and both of these cost real time on it. Neither
+is in a compiler message that points at the cause.
+
+**Every application needs its own `build.rs`, and without one it dies in
+`onCreate`.** The engine is linked by `build.rs`, per application, reading
+`rustflutter_link.txt` out of the engine directory — copy
+`apps/photo_scroller/build.rs`. Leave it out and the application compiles with
+no warning, packages, installs, and then:
+
+```
+dlopen failed: cannot locate symbol "rf_path_cubic_to" referenced by "libflower.so"
+```
+
+The engine exports that symbol; `nm -D` on it says so. What is missing is
+`DT_NEEDED`: without the build script `libflower.so` is linked with no record
+that it needs `librustflutter_engine.so`, so the loader has nothing to search and
+reports the first `rf_*` it cannot resolve — which is why the message names a
+function the application never called, and why it moved when unrelated code
+changed. `readelf -d <app>.so | grep NEEDED` settles it in one command; the
+engine has to be on that list. `photo_scroller.so` loads and does not, which is
+what makes this so confusing: it is the one application that never noticed.
+
+**`advance` is handed a timestamp, not a duration.** `FrameContext` documents
+`frame_time_micros` as "the time the frame is targeted at, in microseconds since
+epoch", and the name reads like a duration. It is not: adding it to a running
+clock advances that clock by however long ago the epoch was. The first draft of
+the flower read `bloom 2246` about two minutes after launch, which looks like a
+fast animation rather than a wrong one. Keep the previous stamp and difference
+it, clamped so a stalled frame jumps rather than plays:
+
+```rust
+let now = frame_time_micros as f32 / 1_000_000.0;
+let delta = io.last.replace(now).map(|t| (now - t).min(0.1)).unwrap_or(0.0);
+```
+
+Two more, both layout, both silent:
+
+**A render object that answers a layout with `constraints.biggest()` collapses
+to nothing in a `Column`.** The main axis there is unbounded, and the tree
+clamps an unbounded `biggest()` to the minimum — zero. The scene drew off the
+bottom of the screen with nothing on it and no error. `Expanded` hands it the
+space that is actually left over.
+
+**`Canvas::saved()` is not reentrant.** It takes `&mut Canvas` and a closure that
+also borrows it, so nesting one inside another is a borrow error rather than a
+nested save/restore. Use explicit `save()` / `restore()` pairs, which is what
+every transform in the flower uses.
+
+And one that is not silent at all but reads like something else:
+**`RenderPath::quadratic_to` fails to link against this engine**, so
+`dlopen` reports it as `cannot locate symbol "rf_path_quadratic_to"` — in the
+flower, named for a call the application had already removed, because
+`borders.rs` uses it too. `quadratic_as_cubic` in `apps/flower` is the
+conversion, and it is exact rather than approximate.
+
 ## Still open
 - `re2` and `spring_animation` are still referenced by the build graph with no
   `DEPS` entry. Unreachable from an Android build; a web or iOS build fails.

@@ -196,6 +196,32 @@ together. It is `rustflutter_engine.dll` on Windows, `librustflutter_engine.so`
 on Linux and Android, `librustflutter_engine.dylib` on macOS, and the same
 feature picks it everywhere.
 
+### An application needs a `build.rs`, and it is not optional
+
+Every application carries its own `build.rs` that links the engine — see
+`apps/photo_scroller/build.rs`. Copy it. Without it the application **compiles
+cleanly, installs, and dies in `onCreate`** with:
+
+```
+dlopen failed: cannot locate symbol "rf_path_cubic_to" referenced by "lib<app>.so"
+```
+
+The symbol is in the engine. What is missing is `DT_NEEDED`:
+`lib<app>.so` was linked with no record that it needs `librustflutter_engine.so`
+at all, so the loader has nothing to search and reports the first `rf_*` it
+cannot find — whichever that happens to be, which is why the message names a
+function the application never called. `readelf -d lib<app>.so | grep NEEDED`
+is the check; `librustflutter_engine.so` has to be on that list.
+
+### `advance` gets a timestamp, not a duration
+
+`StatefulComponent::advance(&self, state, frame_time_micros)` is handed **the
+time the frame is targeted at, in microseconds since the epoch**. Adding it to a
+clock advances that clock by however long ago the epoch was — a frame counter
+that reads `bloom 2246` seconds after launch is this, and nothing about it looks
+like a time bug. Keep the previous timestamp and difference it yourself, clamped
+so a stalled frame does not jump the animation rather than play it.
+
 The engine exports exactly the surface an application reaches — the 100 `rf_*`
 FFI functions, `rf_host_run`, and the two that register the framework's own
 table — and nothing of Skia, Impeller, txt or the shell. Calls the other way,
@@ -347,6 +373,7 @@ change by a line.**
 | `flutter_gallery` | The upstream Gallery ported: 26 screens, navigation stack, slide transitions |
 | `platform_channels` | Every channel the engine defines, both ways: clipboard, a `TextField` typed into, the mouse cursor, the reader's settings, and a close the application refuses. Against a real shell; checks itself and exits non-zero on a wrong answer |
 | `cursor_demo` | **Test by hand.** Tap a cursor name and watch the pointer change over the window. On a touch screen it says so rather than pretending |
+| `flower` | A bloom, drawn with nothing but paths: nine petals in two rings opening in sequence over one timeline, sepals peeling back, a disc and stamens arriving last, motes drifting past. One render object and one number in 0..1 |
 | `exit_demo` | **Test by hand.** The close button is a question; a switch decides the answer |
 | `text_demo` | **Test by hand.** Tap a field and type. The soft keyboard, the composing run, backspace, done, and switching fields -- the one channel a process cannot drive at itself |
 | `settings_demo` | **Test by hand.** Change the theme, text size or language in the system settings and watch this window follow. Names the right settings on each platform |
