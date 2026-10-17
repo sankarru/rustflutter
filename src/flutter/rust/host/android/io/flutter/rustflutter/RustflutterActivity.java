@@ -175,6 +175,16 @@ public class RustflutterActivity extends Activity implements SurfaceHolder.Callb
   private static android.view.inputmethod.ExtractedTextRequest sExtractRequest;
 
   private HostView mView;
+
+  /**
+   * The window's platform views, and the surface they draw over.
+   *
+   * <p>Non-null for the life of the Activity. Upstream this role is
+   * {@code FlutterViewLayout}; the fork had one SurfaceView and no container,
+   * which is why a platform view had nowhere to be parented.
+   */
+  private PlatformViewContainer mPlatformViews;
+
   private boolean mStarted;
   private boolean mSurfaceReady;
 
@@ -229,11 +239,34 @@ public class RustflutterActivity extends Activity implements SurfaceHolder.Callb
 
     mView = new HostView(this);
     mView.getHolder().addCallback(this);
-    // Opaque: the Surface is what the engine draws every pixel of, and a
-    // translucent one would make the compositor blend it with a window
-    // background that is never visible.
-    mView.getHolder().setFormat(PixelFormat.OPAQUE);
-    setContentView(mView);
+    // Translucent, and behind the window's own views.
+    //
+    // A SurfaceView is a separate hardware surface, normally composited *behind*
+    // the window, so a sibling View cannot draw over it. setZOrderMediaOverlay
+    // puts the surface behind the window's children while keeping it above other
+    // surfaces, and TRANSLUCENT gives it the alpha channel the compositor needs
+    // to blend it with them. Both are required; neither is sufficient.
+    //
+    // This is the opposite of what it was, and deliberately: OPAQUE was right
+    // when the surface was the only view in the window, because then the engine
+    // drew every pixel and a translucent surface would blend with a background
+    // that is never visible. A platform view is a real View that has to draw
+    // over this one.
+    //
+    // Nothing punches a hole in the Flutter output for it, which upstream does
+    // and this does not need to: a platform view here is opaque, so it covers
+    // the surface whatever the surface contains.
+    mView.getHolder().setFormat(PixelFormat.TRANSLUCENT);
+    mView.setZOrderMediaOverlay(true);
+    // The container rather than the surface, so there is somewhere to put a
+    // platform view. It is a FrameLayout that holds the surface plus one child
+    // per live view.
+    mPlatformViews = new PlatformViewContainer(this, mView);
+    // "webview" is the name the framework's PlatformViewCreationParams carries;
+    // the factory is the only registration there is, since this fork has no
+    // plugin registrar to register with.
+    mPlatformViews.registerFactory("webview", new PlatformViewContainer.WebViewFactory());
+    setContentView(mPlatformViews);
     mView.setFocusable(true);
     mView.setFocusableInTouchMode(true);
     mView.requestFocus();
