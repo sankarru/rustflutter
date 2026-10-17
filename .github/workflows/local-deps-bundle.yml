@@ -357,6 +357,42 @@ jobs:
             --no-rbe \
             --ccache
 
+      # Wrap the host clang in ccache by hand.
+      #
+      # `--ccache` is set and use_ccache is true in args.gn, but it only reaches
+      # the Android cross toolchain: the generated `rule clang_arm64_cxx` and
+      # `clang_arm64_cc` carry the prefix, the host `rule cxx` and `rule cc` do
+      # not. Measured on an android_release build with --ccache: 2285 cacheable
+      # calls out of ~8000 edges, and rebuilding host cxx edges recorded zero --
+      # so the 5526 host compiles, which include flutter/flow,
+      # flutter/shell and flutter/rust/ffi, were never cached at all.
+      #
+      # `build/toolchain/linux/BUILD.gn` sets compiler_prefix = "ccache " and
+      # interpolates it into the host toolchains' cc/cxx, but
+      # `build/toolchain/gcc_toolchain.gni:77` assigns compiler_prefix = "" in
+      # its own scope before `cc = compiler_prefix + invoker.cc`, so the value
+      # never arrives. Rewiring all six clang toolchains there to read it through
+      # a name the template does not assign changed nothing in the generated
+      # ninja -- so rather than keep guessing at which toolchain emits the root
+      # rules, this makes the compiler itself the wrapper.
+      #
+      # The scripts are byte-identical on both sides (absolute path and all),
+      # which is what keeps CCACHE_COMPILERCHECK=content hashing the same value.
+      # Renamed rather than deleted so a re-run of gclient sync restores them.
+      - name: Wrap the host clang in ccache
+        if: env.SYNC_INCOMPLETE == '0'
+        run: |
+          set -eux
+          BT="$GITHUB_WORKSPACE/src/flutter/buildtools/linux-arm64/clang/bin"
+          for t in clang clang++; do
+            test -x "$BT/$t.real" || mv "$BT/$t" "$BT/$t.real"
+            printf '#!/bin/sh\nexec ccache %s "$@"\n' "$BT/$t.real" > "$BT/$t"
+            chmod +x "$BT/$t"
+            echo "--- $t ---"
+            cat "$BT/$t"
+            "$BT/$t" --version | head -1
+          done
+
       # Allowed to fail, and that is deliberate. The ccache is the part that can
       # be regenerated and the part most likely to hit a fresh toolchain
       # problem; the DEPS bundle above is the part that cannot be produced any
