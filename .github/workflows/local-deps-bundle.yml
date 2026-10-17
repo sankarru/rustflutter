@@ -79,6 +79,24 @@ jobs:
       # different compiler. Chromium's own CI sets this for the same reason.
       CCACHE_COMPILERCHECK: "content"
       CCACHE_MAXSIZE: "8G"
+      # The source root, and the reason this is set at all.
+      #
+      # build/config/gcc/BUILD.gn:69 puts the checkout's absolute path into
+      # every compile command:
+      #
+      #   absolute_path = rebase_path("//")
+      #   cflags += [ "-fdebug-prefix-map=$absolute_path=$relative_path" ]
+      #
+      # It is computed, not a gn arg, so --gn-args cannot change it. That path
+      # is part of the command line, the command line is part of the cache key,
+      # and this runner's path is /home/runner/work/rustflutter/rustflutter/src
+      # while a local one is wherever it is -- so every key differs and the
+      # cache returns 0 hits. Measured: 0/2160.
+      #
+      # CCACHE_BASEDIR rewrites absolute paths under it to be relative before
+      # hashing, which makes both sides agree. Set to the same directory on both
+      # -- the source root, which is what rebase_path("//") returns.
+      CCACHE_BASEDIR: ${{ github.workspace }}/src
 
     steps:
       - name: Checkout
@@ -106,12 +124,32 @@ jobs:
           sudo rm -rf /usr/local/lib/android /opt/hostedtoolcache/CodeQL
           df -h /
 
-      - name: Set up ccache
+      # ccache, built from source at the version the machine that reads the cache
+      # has. ubuntu-24.04 ships 4.9.1 and ccache publishes no aarch64 binary at
+      # all -- only linux-x86_64, darwin, windows -- so an arm runner cannot
+      # install a matching release and has to compile one.
+      #
+      # Matching matters because ccache hashes the compiler into every key, and
+      # a differing version can differ in what it hashes.
+      - name: Build ccache 4.11.2
         run: |
+          set -eux
+          CCACHE_VERSION=4.11.2
+          curl -fSL --retry 3 -o /tmp/ccache.tar.xz \
+            "https://github.com/ccache/ccache/releases/download/v${CCACHE_VERSION}/ccache-${CCACHE_VERSION}.tar.xz"
+          tar -xf /tmp/ccache.tar.xz -C /tmp
+          rm -f /tmp/ccache.tar.xz
           sudo apt-get update
-          sudo apt-get install -y ccache
+          sudo apt-get install -y cmake
+          cmake -S "/tmp/ccache-${CCACHE_VERSION}" -B "/tmp/ccache-${CCACHE_VERSION}/build" \
+            -DCMAKE_BUILD_TYPE=Release -DZSTD_FROM_INTERNET=ON
+          cmake --build "/tmp/ccache-${CCACHE_VERSION}/build" -j"$(nproc)"
+          sudo cmake --install "/tmp/ccache-${CCACHE_VERSION}/build"
+          # /usr/local/bin precedes /usr/bin, but say so rather than trust it:
+          # a silently older ccache would write a cache nothing can read.
+          hash -r
+          which ccache
           ccache --version | head -1
-          ccache --set-config=max_size="$CCACHE_MAXSIZE"
 
       # depot_tools' clone from googlesource 503s often enough to be worth a retry --
       # it failed a whole run here with "RPC failed; HTTP 503" while nothing was
