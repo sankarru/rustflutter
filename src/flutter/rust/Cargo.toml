@@ -25,6 +25,33 @@ resolver = "3"
 codegen-units = 256
 incremental = false
 
+# For iterating the Rust half against a device: the framework is compiled with
+# opt-level=1 when it is built as a *dependency*, which is every app build.
+#
+# Opt-level 0 is right for a test binary and wrong for an app whose frames have
+# to keep up; opt-level 3 spends minutes per rebuild. One is the middle, and
+# `debug = 1` keeps line numbers so a backtrace from a device names lines.
+#
+# Scoped to `package."*"` deliberately. That key covers dependencies only, never
+# the root package, so the two commands land where each wants to be:
+#
+#   cargo build -p photo_scroller   rustflutter is a dependency  -> opt-level=1
+#   cargo test  -p rustflutter      rustflutter is the root      -> opt-level=0
+#
+# Without the scoping the test suite would pay opt-level=1 to compile the very
+# large crate whose 6995 tests run in about a second.
+#
+# This is the `dev` profile rather than a separate one because `acs` has no
+# `--profile` flag: it passes `--release` or nothing at all. A profile named
+# `thin` would therefore be unreachable by the packaging tool, which would keep
+# staging whatever `dev` last produced -- so `dev` itself is the thin build.
+#
+# LLVM, not Cranelift: see `[profile.cl]` below. That one miscompiles panic
+# recovery, which is a real bug rather than a slow build.
+[profile.dev.package."*"]
+opt-level = 1
+debug = 1
+
 # Cranelift, as an opt-in profile rather than the `dev` default.
 #
 # It is not the default because it miscompiles this crate's panic handling: the
@@ -43,6 +70,9 @@ incremental = false
 # release.
 #
 #   cargo build --profile cl --target aarch64-linux-android
+#
+# `[profile.thin]` above is the one to use for device iteration instead: it is
+# LLVM, so it does not have this bug, and it is a fraction of the cost.
 [profile.cl]
 inherits = "dev"
 codegen-backend = "cranelift"

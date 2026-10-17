@@ -50,7 +50,7 @@ SCCACHE_IDLE_TIMEOUT = "600"
 #
 # force = false so an explicit RUSTFLUTTER_ENGINE_OUT in the environment wins
 # over this default; without it the [env] table would overwrite the caller's.
-RUSTFLUTTER_ENGINE_OUT = { value = "/home/flux/rustflutter/engine_arm64", relative = false, force = false }
+RUSTFLUTTER_ENGINE_OUT = { value = "/home/flux/pro/rustflutter/engine_arm64", relative = false, force = false }
 
 # C dependencies (ring, for rustls) are built by cc-rs, which does not read the
 # [target.*] table above -- it looks for CC_<triple> / CC_<triple with dashes>
@@ -59,17 +59,17 @@ RUSTFLUTTER_ENGINE_OUT = { value = "/home/flux/rustflutter/engine_arm64", relati
 # build script trying to find `aarch64-linux-android-clang`. Set here rather
 # than in the caller's environment so the workspace builds from a clean shell.
 # force = false, so an explicit CC in the environment still wins.
-CC_aarch64_linux_android = { value = "/home/flux/Android/ndk/r29/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang", relative = false, force = false }
-AR_aarch64_linux_android = { value = "/home/flux/Android/ndk/r29/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar", relative = false, force = false }
+CC_aarch64_linux_android = { value = "/home/flux/dev/r29/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang", relative = false, force = false }
+AR_aarch64_linux_android = { value = "/home/flux/dev/r29/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar", relative = false, force = false }
 
 # NDK r29's compiler runtime, for libunwind.a. Rust's standard library unwinds;
 # the engine is built -fno-exceptions and links -nostdlib so it supplies none of
 # that, and an application is a cdylib with nothing else to. Static, so it adds
 # no runtime dependency to the APK.
-RUSTFLUTTER_NDK_UNWIND_DIR = { value = "/home/flux/Android/ndk/r29/toolchains/llvm/prebuilt/linux-x86_64/lib/clang/22/lib/linux/aarch64", relative = false, force = false }
+RUSTFLUTTER_NDK_UNWIND_DIR = { value = "/home/flux/dev/r29/toolchains/llvm/prebuilt/linux-x86_64/lib/clang/22/lib/linux/aarch64", relative = false, force = false }
 
 [target.aarch64-linux-android]
-# NDK r29, at /home/flux/Android/ndk/r29.
+# NDK r29, at /home/flux/dev/r29.
 #
 # The prebuilt directory is named `linux-x86_64` but the clang in it is an
 # aarch64 build (it reports `Target: aarch64-unknown-linux-gnu`), so it runs
@@ -82,9 +82,9 @@ RUSTFLUTTER_NDK_UNWIND_DIR = { value = "/home/flux/Android/ndk/r29/toolchains/ll
 # wrappers from 21 up; picking a lower one links against symbols the APK's
 # manifest will not let the loader resolve, and it fails at install time on the
 # device rather than at build time here.
-linker = "/home/flux/Android/ndk/r29/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+linker = "/home/flux/dev/r29/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
 # NDK r29 dropped the `ar` shim; llvm-ar is the one it ships.
-ar = "/home/flux/Android/ndk/r29/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+ar = "/home/flux/dev/r29/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
 rustflags = [
     "-Clink-arg=--target=aarch64-linux-android24",
     "-Clink-arg=-fuse-ld=lld",

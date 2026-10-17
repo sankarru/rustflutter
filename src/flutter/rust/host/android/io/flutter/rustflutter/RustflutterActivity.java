@@ -1782,6 +1782,24 @@ public class RustflutterActivity extends Activity implements SurfaceHolder.Callb
   // asserts its initializer runs exactly once.
   private static native void nativeInitNdkContext(Activity activity);
 
+  /**
+   * The engine's platform thread asking for one platform view operation.
+   *
+   * <p>Declared here and not called on {@link PlatformViewContainer} directly,
+   * because the Rust side cannot name that class. It reaches a Java class the
+   * only way that works from a thread the JVM never called: by asking the
+   * Activity for its own class object, which carries the application's
+   * classloader. {@code find_class} on such a thread resolves through the
+   * <em>system</em> loader and cannot see the app's classes at all.
+   *
+   * <p>So this forwarder exists to give that lookup a method to find. Calling the
+   * container's own static would be a null-pointer walk from here and no better.
+   */
+  static boolean dispatchPlatformViewTask(
+      long id, int tag, int a, int b, int c, int d, int e, boolean visible) {
+    return PlatformViewContainer.dispatchPlatformViewTask(id, tag, a, b, c, d, e, visible);
+  }
+
   private static native void nativeSurfaceCreated(
       Surface surface, int width, int height, float devicePixelRatio, float refreshRate);
 

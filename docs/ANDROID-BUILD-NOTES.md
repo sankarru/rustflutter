@@ -198,6 +198,64 @@ library it packages, so both are passable now and default by detecting what the
 SDK actually has. Comparing those version numbers as strings picks `9.0.0` over
 `36.1.0`.
 
+### acs packages a pointer, and the pointer is not the library
+
+`acs --rust` does not stage from `src/flutter/rust/target`. Its
+`rustapp:cargo` task runs cargo with `--target-dir .ca-cache/rust-target`
+and then writes a **pointer file**, `app/build/debug/rustapp-work/cargo.so` —
+99 bytes of text holding the path to the real `.so`. `rustapp:stageLibs`
+follows the pointer and copies whatever it names into the APK.
+
+So an edit to Rust that is rebuilt correctly and then not seen on the device
+has two likely causes, and both look like the tool being broken. First, if
+that pointer has been hand-written — it is tempting, because a stale pointer
+produces `cargo stamp names .../libphoto_scroller.so, which is not there`,
+and pointing it somewhere that does exist silences that error — then acs
+packages that path forever and never rebuilds. Second, the task is keyed on
+`.ca-cache/fingerprints-app-debug.json` and acs writes that file only on a
+fully successful run, so a failed run leaves no fingerprint and the next run
+redoes everything.
+
+What works every time is to build into acs's own target directory and let acs
+package:
+
+```
+cd src/flutter/rust
+cargo build -p photo_scroller --target aarch64-linux-android \
+    --target-dir /home/flux/pro/rustflutter/.ca-cache/rust-target
+cd /home/flux/pro/rustflutter
+export RUSTFLUTTER_ENGINE_OUT=/home/flux/pro/rustflutter/engine_arm64
+acs . --rust --rust-crate src/flutter/rust/apps/photo_scroller --engine-root .
+```
+
+sccache is configured, so the hand-driven run costs about 50 seconds even on a
+cold profile. acs prints nothing for a task it skips, so the absence of
+`[EXEC] rustapp:cargo` is the tell that it decided nothing changed.
+
+### A thin debug profile acs can actually reach
+
+Iterating the Rust half against a device wants something between `dev` and
+`release`: `dev` optimises nothing, which is wrong for an app whose frames
+have to keep up, and `release` spends minutes per build. `Cargo.toml` sets
+
+```toml
+[profile.dev.package."*"]
+opt-level = 1
+debug = 1
+```
+
+Scoped to `package."*"` on purpose. That key covers dependencies but never the
+root package, so the two commands land where each wants to be: building
+`photo_scroller` compiles the framework at `-O1`, while
+`cargo test -p rustflutter` still compiles that same very large crate at `0`
+and its 6995 tests stay fast. Scoping it to `dev` itself would make the test
+suite pay `-O1` to build the crate it is about to exercise.
+
+It has to live in `dev` rather than a separately named profile because **acs
+has no `--profile` flag** — it passes `--release` or nothing at all. A profile
+named `thin` is unreachable by the packaging tool, which would go on staging
+whatever `dev` last produced.
+
 ## The ABI comes from the directory name
 
 `build_apks.py:abi_for()` reads the ABI off the output directory — `_arm64` →
@@ -395,6 +453,130 @@ The other packager that knows all of this is acs `--rust`, which derives the
 permissions from the sources, compiles the sentinel Kotlin itself, and
 writes the manifest -- `INTERNET` included, as a named `const` next to the
 code that needs it, so the requirement lives with its reason.
+
+## Platform views: a WebView in the middle of a scroll
+
+`photo_scroller` now hosts a live Android `WebView` between the photographs.
+It is real hybrid composition: a genuine `View` parented into the window
+beside the `SurfaceView`, drawn by Android over the Flutter surface, moving
+with the list and keeping its page.
+
+The surprising part is how little of the engine that needed. The tree is a
+de-Dart-ified upstream engine and it has no `PlatformViewsDelegate` anywhere
+and no platform-view branch in the `Compositor` -- that is what Phase A was
+written around and what looked like the whole job. It is not, because
+**hybrid composition of an opaque view needs no help from the compositor at
+all.** Upstream pushes a `PlatformViewLayer` so the compositor knows to clear
+that rectangle of its own output and draw the platform view over the top --
+that is the *texture* case, where the View's pixels arrive as an image the
+compositor must place. Here the View draws over the surface on its own, so
+the framework's whole job is to tell the host *where* the view goes. The
+layer push was removed, and with it the reason to touch the `Compositor`.
+
+### Six failures that each looked like something else
+
+None of these announce themselves. Each one produced a working-looking build
+that did the wrong thing.
+
+**JNI's descriptor alphabet is all capitals.** There is no lower-case `i`;
+`int` is `I`. `(JIi)Z` is a parse error, not an int, and `jni` rejects it
+before the JVM ever sees it. The `Err` has the same shape as any other and
+the symptom is a host call that answers `false` forever with nothing in
+logcat. Checked directly against jni 0.21.1: `(JIi)Z` is rejected, `(JI)Z`
+and `(IIIIIII)Z` both parse. A scratch crate that parses the descriptor on the
+host costs a minute and saves an afternoon.
+
+**The class has to come from the Activity.** `find_class` on the engine's
+platform thread resolves through the *system* classloader, which cannot see
+the application's own classes. The symptom is a `ClassNotFoundException`
+for a class that is plainly in the dex, raised on the first platform view
+task and nothing else -- the same wall
+[mobile-sentinel hit](#capabilities-the-mobile-sentinel-hybrid), for the same
+reason. `env.get_object_class(activity)` asks the object's own classloader
+instead.
+
+**`call_static_method`, not `call_method`.** The dispatch entry point is
+static. `call_method` searches for an *instance* method and raises
+`NoSuchMethodError`, which on the engine's thread is a hard crash rather than
+an error return.
+
+**A View may only be built on the main looper.** `new WebView()` on the
+engine's thread builds a `Handler`, whose constructor dereferences
+`Looper.mQueue` on the *current* thread -- null on a thread that has never
+looped -- so it dies with a `NullPointerException` before any of our code
+runs. `on_ui_thread` in Rust used to claim it posted and waited; it only ever
+called the static method on the calling thread. The post now happens in Java,
+because a `Runnable` carrying a closure cannot be built from Rust without
+parking that closure in a global for Java to call back into.
+
+**Logical pixels in, physical pixels out.** Upstream's
+`PlatformViewsController.toPhysicalPixels` is
+`logicalPixels * displayDensity`, and it has to happen host-side for the same
+reason it does there: a rectangle handed straight to `setLayoutParams` lands
+at the same numeric offset on every device and is therefore correct only on
+the one whose density is 1. On a 2.625x screen a 387-wide view would be 147
+logical pixels, a little over a third of the card it is meant to fill.
+
+**Five int slots, not four.** A bounds update carries left, top, width *and*
+height. With one slot short, every value landed one position early and the
+height was never sent at all -- which reads as a view of the right width and
+a third of the right height. The signature is `(JIIIIIIZ)Z`, with `a..d` the
+bounds so the Java side reads them identically for every task, and `e`
+carrying the type index where the bounds are meaningless.
+
+### The view was not being clipped. It was being rebuilt.
+
+`RenderPlatformView` had `impl Drop { controller.destroy(id) }`, on the
+reasoning that a render object going away should take its view with it.
+Render objects here are **per-frame**: `Component::build` runs again on every
+rebuild, and a drag is a rebuild sixty times a second. One swipe produced
+`CREATE=30 DESTROY=30` -- the WebView was destroyed and recreated thirty
+times in a single gesture, reloading its page each time, and never finished
+rendering. It was not misplaced, not clipped, and not a compositing problem;
+it was being rebuilt while you looked at it.
+
+The lifetime belongs to the `PlatformViewController`, which the application
+holds, and the render object is a handle to it. `Drop` now lives on the
+controller and only fires when `Rc::strong_count(&inner) == 1`, which is
+when the *application* drops its own handle. That is also what the long
+standing claim wanted -- a view scrolled out of a viewport is still alive and
+still holding its page -- and it is what upstream does: there the view is
+owned by a `PlatformViewLayer` and released when the layer is disposed, not
+when a render box is collected.
+
+### And the "rendering limits" were a stale dirty region
+
+The other disappearing act looked like a compositing bug and was not. Moving
+the view with `view.layout(l, t, r, b)` directly is cheaper than
+`setLayoutParams` and is wrong: outside a layout traversal Android does not
+recompute which regions the view covers, so the strip it has just vacated is
+never invalidated, and the view's content is clipped against a rectangle that
+no longer matches where it is. What that looks like is a hard-edged band of
+the WebView going blank as it scrolls, with stale pixels trailing it -- the
+contents hiding behind the rendering limits. `setLayoutParams` is a
+`requestLayout`, and the traversal it schedules is what invalidates both the
+old and the new rectangle.
+
+The per-frame cost of that traversal is kept off the WebView by
+`PlatformViewContainer.onLayout`, which measures a child only when its size is
+not already right. Bounds and visibility are also *posted* rather than
+posted-and-waited, because waiting puts a full UI round trip into every frame
+of a scroll and leaves the render thread paced by the UI thread. Creation still
+waits: it happens once per view, so the round trip is free, and the caller
+needs the answer, since a framework told "created" about a view that was never
+made will go on positioning a view that is not there.
+
+### What platform views do not do yet
+- Creation params are not implemented. The registry answers by type name and
+  `WebViewFactory` hardcodes a `data:` URL. Upstream's WebView plugin takes
+  its URL from `PlatformViewCreationParams`. Making params work means
+  reinstating the `PlatformViewsChannel` that already sits unused in
+  `shell/platform/android`.
+- Only opaque platform views. Nothing punches an alpha hole in the Flutter
+  output, so a translucent view would blend with whatever Flutter painted
+  underneath it rather than with what is behind the window.
+  `PlatformViewContainer.setOpaqueOnly()` records this rather than leaving it
+  as a surprise.
 
 ## Still open
 - `re2` and `spring_animation` are still referenced by the build graph with no

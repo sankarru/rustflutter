@@ -24,10 +24,30 @@
 //! So the interesting part is not the drawing, and it is not the hit testing
 //! either -- [`PlatformViewHitTestBehavior`] in [`crate::platform_tree`] already
 //! has that ported, including the part that is easy to get backwards. It is
-//! that **creation has a lifetime and layout has a frequency**: a view is
-//! created when the render object first needs it and destroyed when it goes
-//! away, while its bounds are pushed every frame it moves, which during a
-//! scroll is every frame.
+//! that **layout has a frequency and creation has a lifetime**, and that the
+//! two have to be attached to *different* owners.
+//!
+//! Bounds are pushed every frame the view moves, which during a scroll is every
+//! frame. Creation happens once. That sounds like a distinction only worth
+//! documenting, and for a while it was documented and got wrong anyway: the
+//! render object destroyed the view when it dropped, on the reasoning that a
+//! render object going away means its view should go too.
+//!
+//! Render objects here are **per-frame**. `Component::build` runs again on every
+//! rebuild, and a rebuild is what a drag does sixty times a second, so the
+//! render object is rebuilt on every frame of a scroll and the one before it is
+//! dropped on every frame of a scroll. Tying destruction to the render object
+//! therefore destroyed and recreated the view sixty times a second, which for a
+//! `WebView` means the page is torn down and reloaded continuously and is
+//! invisible the whole time -- the view was not misplaced or clipped, it was
+//! being destroyed faster than it could draw.
+//!
+//! So the lifetime belongs to the [`PlatformViewController`], which the
+//! application holds, and the render object is a handle to it. That is also what
+//! "a view scrolled out of a viewport is still alive and still holds its state"
+//! requires, and it is what upstream does: there the view is owned by a
+//! `PlatformViewLayer` and released when the *layer* is disposed, not when a
+//! render box is collected.
 
 use crate::engine::Rect;
 use crate::platform_tree::{
@@ -65,56 +85,69 @@ pub trait PlatformViewHost {
 }
 
 /// The C ABI, which is what a real application talks to.
+///
+/// On Android this is [`crate::android_host`], which attaches the engine's
+/// thread to the JVM and posts to the main looper. Everywhere else there is no
+/// host, and every call reports that rather than pretending.
 pub struct EngineHost;
+
+/// Not a real host: there is no JVM here, so every call reports that rather
+/// than pretending to have acted.
+///
+/// Separate from the `cfg` arms because a stubbed build compiles
+/// `EngineHost` and must not be able to reach for `android_host`, which is not
+/// in the build.
+#[cfg(not(target_os = "android"))]
+const NO_HOST: &str = "platform views need an Android host";
 
 impl PlatformViewHost for EngineHost {
     fn create(
         &mut self,
         params: &PlatformViewCreationParams,
-        encoded: &[u8],
+        _encoded: &[u8],
     ) -> Result<(), String> {
-        let mut kind = params.view_type.clone().into_bytes();
-        kind.push(0);
-        let status = unsafe {
-            crate::engine::sys::rf_platform_view_create(
-                params.id,
-                kind.as_ptr() as *const std::ffi::c_char,
-                if encoded.is_empty() {
-                    std::ptr::null()
-                } else {
-                    encoded.as_ptr()
-                },
-                encoded.len(),
-            )
-        };
-        if status == 0 {
-            Ok(())
-        } else {
-            Err(format!(
+        #[cfg(target_os = "android")]
+        {
+            if crate::android_host::platform_view_create(params.id, &params.view_type) {
+                return Ok(());
+            }
+            return Err(format!(
                 "no factory registered for view type {:?}",
                 params.view_type
-            ))
+            ));
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = params;
+            Err(NO_HOST.to_string())
         }
     }
 
     fn destroy(&mut self, view_id: i64) {
-        unsafe { crate::engine::sys::rf_platform_view_destroy(view_id) };
+        #[cfg(target_os = "android")]
+        crate::android_host::platform_view_destroy(view_id);
+        #[cfg(not(target_os = "android"))]
+        let _ = view_id;
     }
 
     fn set_bounds(&mut self, view_id: i64, rect: Rect) {
-        unsafe {
-            crate::engine::sys::rf_platform_view_set_bounds(
-                view_id,
-                rect.left,
-                rect.top,
-                rect.right - rect.left,
-                rect.bottom - rect.top,
-            )
-        };
+        #[cfg(target_os = "android")]
+        crate::android_host::platform_view_set_bounds(
+            view_id,
+            rect.left,
+            rect.top,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
+        );
+        #[cfg(not(target_os = "android"))]
+        let _ = (view_id, rect);
     }
 
     fn set_visible(&mut self, view_id: i64, visible: bool) {
-        unsafe { crate::engine::sys::rf_platform_view_set_visible(view_id, visible) };
+        #[cfg(target_os = "android")]
+        crate::android_host::platform_view_set_visible(view_id, visible);
+        #[cfg(not(target_os = "android"))]
+        let _ = (view_id, visible);
     }
 }
 
@@ -348,22 +381,33 @@ impl RenderBox for RenderPlatformView {
 
     fn paint(&self, context: &mut PaintContext, offset: Offset) {
         let rect = Rect::xywh(offset.dx, offset.dy, self.size.width, self.size.height);
-        // Create before pushing. The layer tree is built ahead of the host
-        // doing anything, so pushing a view the host has not made leaves the
-        // tree referring to something that does not exist.
+        // Create before positioning. The host is told to make the view, and then
+        // told where it is; the other order leaves a view that exists at nowhere.
         let _ = self.controller.create(&self.params);
-        context.in_layer(
-            |tree| tree.push_platform_view(self.params.id, rect),
-            |_| {
-                // Nothing. A platform view draws no pixels here: the View is
-                // composited by Android over the surface, and the layer carries
-                // only where it goes.
-            },
-        );
         // Bounds go out whether or not the view was created, so that a frame
         // which positions an existing view is not lost when creation failed.
         self.controller.set_bounds(self.params.id, rect);
         self.controller.set_visible(self.params.id, true);
+        // The layer push is deliberately absent.
+        //
+        // Upstream pushes a PlatformViewLayer because the compositor needs to
+        // know a View sits in the tree: it clears that region of its own output
+        // and draws the platform view over the top, and it needs the layer to
+        // know which region and in what order. That is the *texture* case, where
+        // the View's pixels arrive as an image the compositor must place.
+        //
+        // This is hybrid composition: `PlatformViewContainer` parents a real
+        // Android View into the window beside the surface, and Android composites
+        // it over the top without the compositor's involvement. So the framework
+        // needs to tell the host *where* the view goes, which is the bounds call
+        // above, and nothing else. Pushing a layer would be a message nothing
+        // reads -- and it would need the Compositor to gain a
+        // PlatformViewLayer branch that this tree does not have, which is the
+        // whole gap the first version of this file was written around.
+        //
+        // `context` is therefore unused, which is itself the point: a platform
+        // view records no display list at all.
+        let _ = context;
     }
 
     /// Upstream's `RenderPlatformView.hitTest`, and the reason it is not the
@@ -403,14 +447,37 @@ impl RenderBox for RenderPlatformView {
     }
 }
 
-impl Drop for RenderPlatformView {
-    /// Destroy on the way out.
+impl Drop for PlatformViewController {
+    /// Destroy what this controller still owns, when the last handle goes.
     ///
-    /// Not on the last paint: a view scrolled out of a viewport is still
-    /// alive, still holding whatever state the page had, and re-creating it
-    /// would reload it.
+    /// **Not** the render object's Drop, and that is the whole point. A render
+    /// object here is rebuilt every frame -- `Component::build` runs again on
+    /// every rebuild, and a scroll is a rebuild a frame -- so a render object
+    /// that destroyed its view on the way out destroyed and recreated it sixty
+    /// times a second. A `WebView` never finished rendering: it was hidden
+    /// during a scroll for the unremarkable reason that it was being rebuilt
+    /// while you looked at it.
+    ///
+    /// The render object is a handle; this is the owner. Destroying here also
+    /// means a view scrolled out of a viewport survives, still holding its page,
+    /// and is torn down once at the end rather than sixty times in the middle.
+    ///
+    /// The `strong_count` guard is what makes this fire exactly once: every
+    /// render object holds a clone of this same controller, and those clones
+    /// come and go every frame. Only when the application drops its own handle
+    /// is there nothing left that might still want the view.
     fn drop(&mut self) {
-        self.controller.destroy(self.params.id);
+        if Rc::strong_count(&self.inner) != 1 {
+            return;
+        }
+        let mut inner = self.inner.borrow_mut();
+        let ids = std::mem::take(&mut inner.live);
+        inner.visible.clear();
+        if let Some(host) = inner.host.as_mut() {
+            for id in ids {
+                host.destroy(id);
+            }
+        }
     }
 }
 

@@ -45,6 +45,8 @@ use std::time::{Duration, Instant};
 
 use rustflutter::gestures::PointerHandlers;
 use rustflutter::painting::Image;
+use rustflutter::platform_tree::PlatformViewCreationParams;
+use rustflutter::platform_view::{AndroidView, EngineHost, PlatformViewController};
 use rustflutter::prelude::*;
 use rustflutter::render::{CrossAxisAlignment, MainAxisAlignment, MainAxisSize, RenderBox};
 use rustflutter::widgets::{
@@ -62,6 +64,10 @@ const CARD_WIDTH: f32 = 320.0;
 const CARD_HEIGHT: f32 = 213.0;
 const CARD_SPACING: f32 = 14.0;
 const CORNER: f32 = 14.0;
+/// How tall the WebView is drawn. A WebView is a scrolling document, so this is
+/// a viewport rather than the page: taller than a card so a screenful of page
+/// is visible without scrolling inside it.
+const WEB_HEIGHT: f32 = 420.0;
 
 /// The expensive half, on the frame's thread. Two per frame is about what a
 /// 60Hz budget absorbs without a visible hitch.
@@ -212,6 +218,62 @@ struct Io {
     /// an outstanding fetch uses -- until the status flips or this deadline
     /// passes. `None` means nobody tapped and no frames are spent on it.
     watch_permission_until: Option<Instant>,
+    /// The WebView in the middle of the scroll, and the host that owns it.
+    ///
+    /// Lives here rather than in the component state because it must outlive
+    /// rebuilds: `Component::build` runs every frame, and a controller made per
+    /// frame would destroy and recreate the View each time, which reloads the
+    /// page. The controller is `Clone` and shares one View, so holding it in `Io`
+    /// is what makes it a single object however often the tree is rebuilt.
+    web: WebViewSlot,
+}
+
+/// The WebView's identity and its host.
+///
+/// A struct rather than three fields so they cannot drift apart: a view with an
+/// id and no controller is one nothing can destroy, and a controller with no id
+/// is one nothing can create.
+#[derive(Clone)]
+struct WebViewSlot {
+    controller: PlatformViewController,
+    id: i64,
+}
+
+impl WebViewSlot {
+    /// One view, in the middle of the photographs.
+    ///
+    /// The id is fixed rather than allocated, because there is exactly one and a
+    /// fresh id per frame would read as a different view every frame. Negative,
+    /// which is deliberate: it proves the `i64` survives the trip to a Java
+    /// `long` rather than being truncated into a different view.
+    fn new() -> WebViewSlot {
+        let controller = PlatformViewController::new();
+        // Attached at construction: the host is the C ABI's Android half, and a
+        // controller with no host reports every call as "no host attached" rather
+        // than pretending to have acted.
+        controller.attach(Box::new(EngineHost));
+        WebViewSlot {
+            controller,
+            id: -1,
+        }
+    }
+
+    /// The render object for the list.
+    ///
+    /// Takes the controller by clone -- it is an `Rc` inside, so this is a
+    /// handle, not a copy, and two objects here would still be one View.
+    fn view(&self) -> Box<dyn RenderBox> {
+        let params = PlatformViewCreationParams::new(self.id, "webview");
+        // Sized, because `RenderPlatformView` has no child to measure and
+        // answers a layout with `constraints.biggest()`. In a list, height is
+        // unbounded, and an unbounded axis has a minimum of 0 -- so the view
+        // laid out to zero tall and there was nothing on screen to find. This is
+        // Flutter's arrangement too: `AndroidView` is a proxy box, and the size
+        // is the parent's to give.
+        Box::new(SizedBox::new(CARD_WIDTH, WEB_HEIGHT).with_child(
+            AndroidView::new(params, self.controller.clone()),
+        ))
+    }
 }
 
 impl Io {
@@ -225,6 +287,7 @@ impl Io {
             viewport: 800.0,
             last: None,
             watch_permission_until: None,
+            web: WebViewSlot::new(),
         }
     }
 
@@ -368,6 +431,11 @@ impl StatefulComponent for Page {
             .iter()
             .map(|(id, caption)| (*caption, io.images.get(&url_for(id)).cloned()))
             .collect();
+        // Cloned out before the borrow is dropped, because the render object
+        // built below needs the controller and outlives this statement. The
+        // controller is an `Rc` inside, so this is a handle: the View it owns
+        // is the same one whichever build asks for it.
+        let web = io.web.clone();
         drop(io);
 
         // One region over the whole list: a drag anywhere scrolls it.
@@ -435,8 +503,16 @@ impl StatefulComponent for Page {
         });
 
         let mut list = ListView::new().with_spacing(CARD_SPACING).with_offset(offset);
-        for (caption, image) in &cards {
+        // The WebView goes in the middle, after two photographs, so it is
+        // somewhere you scroll *to* rather than something already on screen when
+        // the app opens -- which is also the only way to see it work: a view
+        // created off screen still has to be positioned, and the position is the
+        // part that has to be right every frame of the scroll.
+        for (index, (caption, image)) in cards.iter().enumerate() {
             list = list.push(card(caption, image.as_ref()));
+            if index == 1 {
+                list = list.push(web.view());
+            }
         }
         // The permission banner sits above the scroll region, not in it: a
         // request control that scrolls off the top cannot be tapped, which is
