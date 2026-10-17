@@ -13,14 +13,21 @@ it says so, because those are the ones worth reading twice.
 Nothing below is needed for this. It is the shortest path through the notes.
 
 ```sh
-# 1. once: build the engine as a shared library, on a machine with the RAM for
-#    the 5272 C++ targets. This is the android-shared-engine workflow.
+# 1. once: the engine, as a shared library. Either fetch it from CI --
+#    the android-shared-engine workflow, on a machine with the RAM for the
+#    5272 C++ targets ...
 gh workflow run android-shared-engine.yml -f slimpeller=false
 gh run download <run-id> --name rustflutter-engine-arm64-slfalse --dir engine_arm64
 
+#    ... or build it here, which is the only option once you are editing C++.
+#    See "Building the engine here" below; it needs a fetched DEPS tree.
+cd src
+gn gen out/android_release_arm64
+ninja -C out/android_release_arm64 flutter/rust:rustflutter_engine
+
 # 2. compile the Rust here -- no C++ at all
 cd src/flutter/rust
-NDK=/home/flux/Android/ndk/r29/toolchains/llvm/prebuilt/linux-x86_64
+NDK=/home/flux/dev/r29/toolchains/llvm/prebuilt/linux-x86_64
 export CC_aarch64_linux_android=$NDK/bin/aarch64-linux-android24-clang
 export AR_aarch64_linux_android=$NDK/bin/llvm-ar
 cargo build --release -p photo_scroller --target aarch64-linux-android
@@ -29,11 +36,20 @@ cargo build --release -p photo_scroller --target aarch64-linux-android
 cp target/aarch64-linux-android/release/libphoto_scroller.so \
    ../../../engine_arm64/lib.stripped/
 $NDK/bin/llvm-strip ../../../engine_arm64/lib.stripped/libphoto_scroller.so
-ANDROID_SDK_ROOT=/home/flux/Android/Sdk JAVA_HOME=/usr/lib/jvm/java-17-openjdk \
+ANDROID_SDK_ROOT=/home/flux/dev/android-sdk \
+JAVA_HOME=/home/flux/opt/jdk-25.0.4.1+1-temurin \
   python3 ../host/tools/build_apks.py --out ../../../engine_arm64 \
           --permission android.permission.INTERNET
 adb install -r ../../../engine_arm64/apk/photo_scroller.apk
 ```
+
+The SDK, NDK and JDK paths above are this machine's. `JAVA_HOME` pointing at a
+25.x JDK is fine: `make_apk.py` invokes `javac` with `--release 11`, so what
+reaches `d8` is Java 11 class files.
+
+For everything that is *not* an engine change, `acs --rust` is the shorter
+path and does steps 2 and 3 in one -- see
+[acs packages a pointer](#acs-packages-a-pointer-and-the-pointer-is-not-the-library).
 
 Two things about step 3 that are not obvious and are easy to get wrong:
 
@@ -44,6 +60,103 @@ Two things about step 3 that are not obvious and are easy to get wrong:
 - `--permission` is off by default and an application that fetches anything
   needs `android.permission.INTERNET`. See [No application could ever open a
   socket](#no-application-could-ever-open-a-socket).
+
+## Building the engine here
+
+Editing C++ means building the engine here, and the engine is 5272 targets.
+This box has 7 GB of RAM and a full swap file, so a cold `ninja` is not an
+option -- it is not slow, it thrashes. What makes it viable is that the DEPS
+tree and a warm ccache can be fetched from an ARM runner and the local build
+then hits cache on essentially every edge.
+
+### The pieces
+
+`tools/local_android_ndk.sh` is an NDK shim. `build/config/android/config.gni`
+hardcodes an NDK path and `gn` resolves four locations from it; the shim
+satisfies all four so nothing in the build graph has to change.
+
+`.github/workflows/local-deps-bundle.yml` runs on `ubuntu-24.04-arm` and packs
+a fetched DEPS tree plus a warm android ccache into one tarball. Extract it
+over `src/` (about 6.3 GB from a 1.2 GB archive) and the local build is
+incremental from then on.
+
+**The runner has to be ARM.** ccache keys on the compiler, and `DEPS` ships a
+separate clang per host CPU, so an x86_64 cache scores zero hits on arm64. The
+same reason Google's NDKs cannot be used to seed it: they put x86_64 binaries
+in `prebuilt/linux-x86_64` and they will not execute on an ARM host.
+
+### ccache needs all four of these
+
+```sh
+export CCACHE_DIR=$PWD/.ccache
+export CCACHE_BASEDIR=$PWD/src
+export CCACHE_COMPILERCHECK=content
+export CCACHE_IGNOREOPTIONS='-fdebug-prefix-map=.*'
+```
+
+None of them is sufficient. `CCACHE_IGNOREOPTIONS` strips `-fdebug-prefix-map`
+from the command-line hash and `CCACHE_BASEDIR` normalises the absolute paths
+that still reach the manifest key -- each fixes half the problem, and dropping
+either one costs most of the hit rate. (What `CCACHE_COMPILERCHECK=content`
+solves, on the CI side, is a different failure: see
+[ccache scored 0 hits on a restored cache](#ccache-scored-0-hits-on-a-restored-cache).)
+Measured against objects CI actually built (not a random sample of local `.o`
+files, which is how a first measurement looks like failure and is not):
+
+| set | hits |
+|---|---|
+| `CCACHE_IGNOREOPTIONS` only | 3 / 80 |
+| `CCACHE_BASEDIR` only | 0 / 25 -- breaks every android edge |
+| both | 80 / 80, twice running |
+
+### `--ccache` never reaches the host toolchain
+
+`gn args` has `use_ccache`, and it does not work for host objects.
+`build/toolchain/gcc_toolchain.gni` assigns `compiler_prefix = ""` in the
+template's own scope before `cc = compiler_prefix + invoker.cc`, which throws
+away the `"ccache "` that `linux/BUILD.gn` set. Two fixes inside the GN files
+were tried and both produced a byte-identical `toolchain.ninja`, so both were
+reverted:
+
+- stopping the reset, which does not fire because the template reads it from
+  its own scope;
+- guarding with `defined(compiler_prefix)`, which inside a template body tests
+  the *template*'s scope, not the caller's, so it is never true.
+
+`gn desc` reports that `//build/toolchain/linux:clang_arm64` matches no
+targets, which confirms the root `toolchain.ninja` is not generated from that
+file either. Do not spend more time on the GN route.
+
+What works is wrapping the host clang itself, in the workflow and locally:
+
+```sh
+for t in clang clang++; do
+  test -x "$BT/$t.real" || mv "$BT/$t" "$BT/$t.real"
+  printf '#!/bin/sh\nexec ccache %s "$@"\n' "$BT/$t.real" > "$BT/$t"
+  chmod +x "$BT/$t"
+done
+```
+
+That took CI's cacheable calls from 2283 to 4090 and the artifact from 86 MB to
+250 MB. Renamed rather than deleted, so a `gclient sync` restores the originals.
+
+### Local prerequisites, each of which was a separate failure
+
+- `tools/local_android_ndk.sh` (the NDK shim above).
+- `python3 build/linux/sysroot_scripts/install-sysroot.py --arch=arm64`.
+- `apt-get install ccache` -- it is not present by default.
+- **Use `/usr/bin/ninja`, not depot_tools' shim.** The shim dies on
+  `ModuleNotFoundError: pipes` under Python 3.13.
+- `export PATH="$PWD/flutter/third_party/depot_tools:$PATH"` before `gn` of any
+  kind. Without it `gn desc` and `gn refs` fail with `Returned 127`, which
+  reads exactly like a missing sysroot and sends you looking in the wrong place.
+
+### Never let a failed step take the bundle
+
+googlesource 503s constantly, so both `gclient sync` and the depot_tools clone
+need retries. The archive is packed immediately after the sync, both uploads
+are `if: always()`, and eight sentinels refuse to ship a partial tree -- a
+387 MB partial that looked like a valid 1.2 GB one had already cost a run.
 
 ## Environment
 
